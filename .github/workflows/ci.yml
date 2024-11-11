@@ -18,18 +18,18 @@ jobs:
       - name: Create Conda environment
         run: conda env create --file env.yml
 
-      - name: Activate Conda environment and install IntReg
+      - name: Activate Conda environment and install intreg_env
         run: |
-          source $CONDA/bin/activate IntReg
+          source $CONDA/bin/activate intreg_env
           pip install -e .
 
       - name: Verify Conda environment
         run: |
-          source $CONDA/bin/activate IntReg
+          source $CONDA/bin/activate intreg_env
           conda info --all
           conda list
 
       - name: Run Pytest and Coverage
         run: |
-          source $CONDA/bin/activate IntReg
+          source $CONDA/bin/activate intreg_env
           pytest --cov=intreg src/tests/ --cov-report=xml
