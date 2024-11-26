@@ -112,6 +112,7 @@ class MeIntReg:
             )
 
         return -log_L
+    
 
     def _initial_params(self):
         """
@@ -125,19 +126,22 @@ class MeIntReg:
         """
         # Mean of uncensored data for initial beta estimate
         midpoints = (self.y_lower + self.y_upper) / 2.0
-        valid_midpoints = np.where(np.isfinite(midpoints), midpoints, np.nan)
+        valid_mask = np.isfinite(midpoints)
+
+        # Filter X and midpoints to exclude rows with non-finite midpoints
+        X, midpoints = self.X[valid_mask], midpoints[valid_mask]
 
         # Solve linear regression for beta
-        beta_init = np.linalg.lstsq(self.X, valid_midpoints, rcond=None)[0]
+        beta_init = np.linalg.lstsq(X, midpoints, rcond=None)[0]
 
         # Initial guess for random effects as zeros
         u_init = np.zeros(self.n_clusters)
 
-        # Standard deviation of the midpoints for sigma
-        sigma_init = np.nanstd(valid_midpoints)
-        log_sigma_init = np.log(sigma_init)
+        # Standard deviation of the valid midpoints for sigma (log-transformed for positivity)
+        sigma = np.nanstd(midpoints)
+        sigma = np.log(sigma)
 
-        return np.concatenate([beta_init, u_init, [log_sigma_init]])
+        return np.concatenate([beta_init, u_init, [sigma]])
 
     def fit(self, method="BFGS", initial_params=None):
         """
@@ -153,6 +157,7 @@ class MeIntReg:
         """
         if initial_params is None:
             initial_params = self._initial_params()
+        
 
         result = minimize(self.log_L, initial_params, method=method)
         return result
