@@ -69,8 +69,38 @@ class IntReg:
                     - norm.cdf((self.y_lower[interval_censored] - mu) / sigma)
                 )
             )
+        if hasattr(self, "L2_penalties") and len(self.L2_penalties) > 0:
+            log_L = self._apply_L2_regularisation(log_L, params)
 
         return -log_L
+    
+    def _apply_L2_regularisation(self, log_L, params):
+        """
+        Apply L2 regularization penalties to the log-likelihood with automatic scaling.
+
+        Args:
+            log_L (float): Log-likelihood value.
+            params (array-like): Model parameters (beta, random effects, etc.).
+
+        Returns:
+            float: Regularized log-likelihood.
+        """
+        lambda_beta = self.L2_penalties.get("lambda_beta", 0.0)
+        lambda_u = self.L2_penalties.get("lambda_u", 0.0)
+
+        N = self.X.shape[0]
+
+        # Split parameters
+        n_fixed = self.X.shape[1]  # Number of fixed effects
+        beta = params[:n_fixed]  # Fixed effects parameters
+        u = params[n_fixed : n_fixed + self.n_clusters]  # Random effects parameters
+
+        # Compute scaled L2 penalties
+        penalty_beta = (lambda_beta / N) * np.sum(beta**2)
+        penalty_u = (lambda_u / N) * np.sum(u**2)
+
+        # Combine likelihood and regularization penalties
+        return log_L - penalty_beta - penalty_u
 
     def _initial_params(self):
         """
@@ -93,20 +123,28 @@ class IntReg:
 
         return np.array([mu, sigma])
 
-    def fit(self, method="BFGS", initial_params=None):
+    def fit(self, method="BFGS", initial_params=None, bounds=None, options=None, L2_penalties=None):
         """
-        Fit the interval regression model using maximum likelihood estimation.
+        Fit the mixed-effects interval regression model using maximum likelihood estimation.
 
         Args:
             method (str, optional): Optimization method to use. Defaults to "BFGS".
-            initial_params (array-like, optional): Initial guesses for mu and log(sigma).
-            If None, automatic initial guesses are generated.
+            initial_params (array-like, optional): Initial guesses for beta, random effects, and log(sigma).
+                If None, automatic initial guesses are generated.
+            bounds (array-like, optional): bounds for sigma
+            options (dict, optional): scipy minimisation options dictionary
+            L2_penalties (dict or None): Regularisation strengths for fixed and random effects {lambda_beta:..., lambda_u:...}. Defaults to None
 
         Returns:
             OptimizeResult: The result of the optimization process containing the estimated parameters.
         """
+        self.L2_penalties = L2_penalties or {}
+
         if initial_params is None:
             initial_params = self._initial_params()
 
-        result = minimize(self.log_L, initial_params, method=method)
+        result = minimize(
+            self.log_L, initial_params, method=method, bounds=bounds, options=options
+        )
+
         return result
