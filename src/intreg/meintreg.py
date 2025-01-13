@@ -2,6 +2,7 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.stats import norm
 
+
 class MeIntReg:
     """
     Mixed-effects interval regression for censored, uncensored, and interval-censored data,
@@ -11,10 +12,10 @@ class MeIntReg:
         y_lower (array-like): Lower bound values of the intervals.
         y_upper (array-like): Upper bound values of the intervals.
         X (array-like): Covariate matrix for fixed effects.
-        clusters (array-like): Cluster labels for random effects.
+        random_effects (array-like): Labels for random effects.
     """
 
-    def __init__(self, y_lower, y_upper, X, clusters):
+    def __init__(self, y_lower, y_upper, X, random_effects=None):
         """
         Initialize the model with data.
 
@@ -22,15 +23,22 @@ class MeIntReg:
             y_lower (array-like): Lower bounds of the intervals. Use -np.inf for left-censored values.
             y_upper (array-like): Upper bounds of the intervals. Use np.inf for right-censored values.
             X (array-like): Covariate matrix for fixed effects.
-            clusters (array-like): Cluster labels for grouping random effects.
+            random_effects (array-like, optional): labels for grouping random effects. Defaults to None.
         """
         self.y_lower = y_lower
         self.y_upper = y_upper
         self.X = X
-        self.clusters = np.array(clusters)
-        self.n_clusters = len(np.unique(clusters))
 
-    def _compute_effects(self, params):
+        if random_effects is not None:
+            self.random_effects = np.array(random_effects)
+            self.n_random_effects = len(np.unique(random_effects))
+        else:
+            self.random_effects = None
+            self.n_random_effects = 0
+
+    def _compute_effects(
+        self, params: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
         """
         Extract fixed effects (beta), random effects (u), and compute the combined mean (mu).
 
@@ -40,15 +48,18 @@ class MeIntReg:
         Returns:
             tuple: (beta, u, mu), where:
                 beta (array): Fixed effects coefficients.
-                u (array): Random effects for each cluster.
+                u (array): Random effects.
                 mu (array): Combined mean for each observation.
         """
         n_fixed = self.X.shape[1]
         beta = params[:n_fixed]  # Fixed effects
-        u = params[n_fixed : n_fixed + self.n_clusters]  # Random effects for clusters
 
-        # Map random effects to samples based on their clusters
-        mu = np.dot(self.X, beta) + u[self.clusters]
+        if self.random_effects is not None:
+            u = params[n_fixed : n_fixed + self.n_random_effects]
+            mu = np.dot(self.X, beta) + u[self.random_effects]
+        else:
+            u = None
+            mu = np.dot(self.X, beta)
 
         return beta, u, mu
 
@@ -58,7 +69,7 @@ class MeIntReg:
 
         Args:
             params (array-like): Parameters to estimate. The first elements are beta (fixed effects coefficients),
-            followed by the random effects for clusters, and the last element is log(sigma).
+            followed by the random effects, and the last element is log(sigma).
 
         Returns:
             float: Negative log-likelihood value.
@@ -120,27 +131,31 @@ class MeIntReg:
 
         Args:
             log_L (float): Log-likelihood value.
-            params (array-like): Model parameters (beta, random effects, etc.).
+            params (array-like): Model parameters (beta, random effects, log(sigma)).
 
         Returns:
             float: Regularized log-likelihood.
         """
         lambda_beta = self.L2_penalties.get("lambda_beta", 0.0)
         lambda_u = self.L2_penalties.get("lambda_u", 0.0)
+        lambda_sigma = self.L2_penalties.get("lambda_sigma", 0.0)  # New regularization term
 
         N = self.X.shape[0]
 
         # Split parameters
         n_fixed = self.X.shape[1]  # Number of fixed effects
         beta = params[:n_fixed]  # Fixed effects parameters
-        u = params[n_fixed : n_fixed + self.n_clusters]  # Random effects parameters
+        u = params[n_fixed : n_fixed + self.n_random_effects]  # Random effects parameters
+        log_sigma = params[-1]  # Log-transformed sigma (last parameter)
 
         # Compute scaled L2 penalties
         penalty_beta = (lambda_beta / N) * np.sum(beta**2)
         penalty_u = (lambda_u / N) * np.sum(u**2)
+        penalty_sigma = (lambda_sigma / N) * log_sigma**2  # Regularize log(sigma)
 
         # Combine likelihood and regularization penalties
-        return log_L - penalty_beta - penalty_u
+        return log_L - penalty_beta - penalty_u - penalty_sigma
+
 
     def _initial_params(self):
         """
@@ -163,7 +178,10 @@ class MeIntReg:
         beta_init = np.linalg.lstsq(X, midpoints, rcond=None)[0]
 
         # Initial guess for random effects as zeros
-        u_init = np.zeros(self.n_clusters)
+        if self.random_effects is not None:
+            u_init = np.zeros(self.n_random_effects)
+        else:
+            u_init = []
 
         # Standard deviation of the valid midpoints for sigma (log-transformed for positivity)
         sigma = np.nanstd(midpoints)
@@ -171,7 +189,14 @@ class MeIntReg:
 
         return np.concatenate([beta_init, u_init, [sigma]])
 
-    def fit(self, method="BFGS", initial_params=None, bounds=None, options=None, L2_penalties=None):
+    def fit(
+        self,
+        method="BFGS",
+        initial_params=None,
+        bounds=None,
+        options=None,
+        L2_penalties=None,
+    ):
         """
         Fit the mixed-effects interval regression model using maximum likelihood estimation.
 
