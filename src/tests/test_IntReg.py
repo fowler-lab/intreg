@@ -154,7 +154,7 @@ def test_left_censored_data_fit(left_censored_data):
     print (result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 0.9, atol=1e-1)  # Expect mu near 0.9
-    assert np.isclose(result.x[1], -1.8, atol=1e-1)  # Expect infinitely long tails
+    assert np.isclose(result.x[1], -1.8, atol=1e-1)  # Expect sigma near -1.8
 
 
 def test_right_censored_data_fit(right_censored_data):

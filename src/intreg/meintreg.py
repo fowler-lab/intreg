@@ -52,7 +52,7 @@ class MeIntReg:
                 mu (array): Combined mean for each observation.
         """
         n_fixed = self.X.shape[1]
-        beta = params[:n_fixed]  # Fixed effects
+        beta = params[:n_fixed] 
 
         if self.random_effects is not None:
             u = params[n_fixed : n_fixed + self.n_random_effects]
@@ -142,15 +142,14 @@ class MeIntReg:
 
         N = self.X.shape[0]
 
-        # Split parameters
-        n_fixed = self.X.shape[1]  # Number of fixed effects
-        beta = params[:n_fixed]  # Fixed effects parameters
-        u = params[n_fixed : n_fixed + self.n_random_effects]  # Random effects parameters
-        log_sigma = params[-1]  # Log-transformed sigma (last parameter)
+        n_fixed = self.X.shape[1]
+        beta = params[:n_fixed] 
+        u = params[n_fixed : n_fixed + self.n_random_effects] 
+        log_sigma = params[-1]
 
         # Compute scaled L2 penalties
-        penalty_beta = (lambda_beta / N) * np.sum(beta**2)
-        penalty_u = (lambda_u / N) * np.sum(u**2)
+        penalty_beta = (lambda_beta / N) * np.sum(np.square(beta))
+        penalty_u = (lambda_u / N) * np.sum(np.square(u))
         penalty_sigma = (lambda_sigma / N) * log_sigma**2  # Regularize log(sigma)
 
         # Combine likelihood and regularization penalties
@@ -177,7 +176,6 @@ class MeIntReg:
         # Solve linear regression for beta
         beta_init = np.linalg.lstsq(X, midpoints, rcond=None)[0]
 
-        # Initial guess for random effects as zeros
         if self.random_effects is not None:
             u_init = np.zeros(self.n_random_effects)
         else:

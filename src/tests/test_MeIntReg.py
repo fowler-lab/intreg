@@ -10,8 +10,8 @@ def simple_point_data():
     y_lower = np.array([1, 1, 2])
     y_upper = np.array([1, 1, 2])
     X = np.array([[1, 0], [1, 1], [1, 2]])  # Covariates with intercept and slope
-    clusters = np.array([0, 1, 1])
-    return y_lower, y_upper, X, clusters
+    random_effects = np.array([0, 1, 1])
+    return y_lower, y_upper, X, random_effects
 
 
 @pytest.fixture
@@ -20,8 +20,8 @@ def left_censored_data():
     y_lower = np.array([-np.inf, 0, 1])
     y_upper = np.array([1, 1, 2])
     X = np.array([[1, 0], [1, 1], [1, 2]])
-    clusters = np.array([0, 1, 1])
-    return y_lower, y_upper, X, clusters
+    random_effects = np.array([0, 1, 1])
+    return y_lower, y_upper, X, random_effects
 
 
 @pytest.fixture
@@ -30,8 +30,8 @@ def right_censored_data():
     y_lower = np.array([1, 1, 2])
     y_upper = np.array([np.inf, 2, 3])
     X = np.array([[1, 0], [1, 1], [1, 2]])
-    clusters = np.array([0, 1, 1])
-    return y_lower, y_upper, X, clusters
+    random_effects = np.array([0, 1, 1])
+    return y_lower, y_upper, X, random_effects
 
 
 @pytest.fixture
@@ -40,8 +40,8 @@ def mixed_interval_and_point_data():
     y_lower = np.array([1, 2, 3, 3])
     y_upper = np.array([1, np.inf, 4, 3])
     X = np.array([[1, 0], [1, 1], [1, 2], [1, 3]])
-    clusters = np.array([0, 1, 1, 2])
-    return y_lower, y_upper, X, clusters
+    random_effects = np.array([0, 1, 1, 2])
+    return y_lower, y_upper, X, random_effects
 
 
 @pytest.fixture
@@ -50,8 +50,8 @@ def clear_interval_censored_data():
     y_lower = np.array([1, 2, 3, 4])
     y_upper = np.array([2, 3, 4, 5])
     X = np.array([[1, 0], [1, 1], [1, 2], [1, 3]])
-    clusters = np.array([0, 1, 1, 2])
-    return y_lower, y_upper, X, clusters
+    random_effects = np.array([0, 1, 1, 2])
+    return y_lower, y_upper, X, random_effects
 
 
 def test_initial_params(
@@ -71,12 +71,12 @@ def test_initial_params(
         (clear_interval_censored_data, "clear interval censored data"),
     ]
 
-    for (y_lower, y_upper, X, clusters), description in test_cases:
-        model = MeIntReg(y_lower, y_upper, X, clusters)
+    for (y_lower, y_upper, X, random_effects), description in test_cases:
+        model = MeIntReg(y_lower, y_upper, X, random_effects)
 
         initial_params = model._initial_params()
         beta_init = initial_params[: X.shape[1]]
-        u_init = initial_params[X.shape[1] : X.shape[1] + model.n_clusters]
+        u_init = initial_params[X.shape[1] : X.shape[1] + model.n_random_effects]
         log_sigma_init = initial_params[-1]
 
         # Assert beta is computed via linear regression
@@ -117,8 +117,8 @@ def test_log_L(
         (clear_interval_censored_data, "interval-censored data"),
     ]
 
-    for (y_lower, y_upper, X, clusters), description in test_cases:
-        model = MeIntReg(y_lower, y_upper, X, clusters)
+    for (y_lower, y_upper, X, random_effects), description in test_cases:
+        model = MeIntReg(y_lower, y_upper, X, random_effects)
 
         params = model._initial_params()
         log_likelihood = model.log_L(params)
@@ -135,8 +135,8 @@ def test_log_L(
 
 
 def test_simple_point_data_fit(simple_point_data):
-    y_lower, y_upper, X, clusters = simple_point_data
-    model = MeIntReg(y_lower, y_upper, X, clusters)
+    y_lower, y_upper, X, random_effects = simple_point_data
+    model = MeIntReg(y_lower, y_upper, X, random_effects)
     result = model.fit()
     print(result)
     print(result.x[0], result.x[1])
@@ -146,8 +146,8 @@ def test_simple_point_data_fit(simple_point_data):
 
 
 def test_left_censored_data_fit(left_censored_data):
-    y_lower, y_upper, X, clusters = left_censored_data
-    model = MeIntReg(y_lower, y_upper, X, clusters)
+    y_lower, y_upper, X, random_effects = left_censored_data
+    model = MeIntReg(y_lower, y_upper, X, random_effects)
     result = model.fit()
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
@@ -155,8 +155,8 @@ def test_left_censored_data_fit(left_censored_data):
     assert np.isclose(result.x[1], 1, atol=1e-1)
 
 def test_right_censored_data_fit(right_censored_data):
-    y_lower, y_upper, X, clusters = right_censored_data
-    model = MeIntReg(y_lower, y_upper, X, clusters)
+    y_lower, y_upper, X, random_effects = right_censored_data
+    model = MeIntReg(y_lower, y_upper, X, random_effects)
     result = model.fit()
     print (result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
@@ -165,8 +165,8 @@ def test_right_censored_data_fit(right_censored_data):
 
 
 def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
-    y_lower, y_upper, X, clusters = mixed_interval_and_point_data
-    model = MeIntReg(y_lower, y_upper, X, clusters)
+    y_lower, y_upper, X, random_effects = mixed_interval_and_point_data
+    model = MeIntReg(y_lower, y_upper, X, random_effects)
     result = model.fit()
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
@@ -174,8 +174,8 @@ def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
     assert np.isclose(result.x[1], 0.4, atol=1e-1) 
 
 def test_clear_interval_censored_data_fit(clear_interval_censored_data):
-    y_lower, y_upper, X, clusters = clear_interval_censored_data
-    model = MeIntReg(y_lower, y_upper, X, clusters)
+    y_lower, y_upper, X, random_effects = clear_interval_censored_data
+    model = MeIntReg(y_lower, y_upper, X, random_effects)
     result = model.fit()
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)

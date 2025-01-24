@@ -73,34 +73,31 @@ class IntReg:
             log_L = self._apply_L2_regularisation(log_L, params)
 
         return -log_L
-    
+
     def _apply_L2_regularisation(self, log_L, params):
         """
         Apply L2 regularization penalties to the log-likelihood with automatic scaling.
 
         Args:
             log_L (float): Log-likelihood value.
-            params (array-like): Model parameters (beta, random effects, etc.).
+            params (array-like): Model parameters [beta, ..., log_sigma].
 
         Returns:
             float: Regularized log-likelihood.
         """
         lambda_beta = self.L2_penalties.get("lambda_beta", 0.0)
-        lambda_u = self.L2_penalties.get("lambda_u", 0.0)
+        lambda_sigma = self.L2_penalties.get("lambda_sigma", 0.0)
 
-        N = self.X.shape[0]
-
-        # Split parameters
-        n_fixed = self.X.shape[1]  # Number of fixed effects
-        beta = params[:n_fixed]  # Fixed effects parameters
-        u = params[n_fixed : n_fixed + self.n_clusters]  # Random effects parameters
+        n_fixed = self.L2_penalties.get("n_fixed", len(params) - 1)
+        beta = params[:n_fixed]  # Fixed effects (first n_fixed params)
+        log_sigma = params[-1]  # log(sigma) is the last parameter
 
         # Compute scaled L2 penalties
-        penalty_beta = (lambda_beta / N) * np.sum(beta**2)
-        penalty_u = (lambda_u / N) * np.sum(u**2)
+        penalty_beta = (lambda_beta / len(self.y_lower)) * np.sum(np.square(beta))
+        penalty_sigma = (lambda_sigma / len(self.y_lower)) * np.square(log_sigma)
 
         # Combine likelihood and regularization penalties
-        return log_L - penalty_beta - penalty_u
+        return log_L - penalty_beta - penalty_sigma
 
     def _initial_params(self):
         """
@@ -123,7 +120,14 @@ class IntReg:
 
         return np.array([mu, sigma])
 
-    def fit(self, method="BFGS", initial_params=None, bounds=None, options=None, L2_penalties=None):
+    def fit(
+        self,
+        method="BFGS",
+        initial_params=None,
+        bounds=None,
+        options=None,
+        L2_penalties=None,
+    ):
         """
         Fit the mixed-effects interval regression model using maximum likelihood estimation.
 
