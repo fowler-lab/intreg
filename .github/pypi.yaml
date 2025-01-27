@@ -1,0 +1,69 @@
+name: Build and release PyPI
+#Based on the similar action for `gumpy`
+
+#Ensure this only runs when (pre)released
+on:
+  release:
+    types: [released, prereleased]
+
+jobs:
+  build:
+    name: Publish release to PyPi
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v2
+
+      - name: Set up Conda
+        uses: conda-incubator/setup-miniconda@v2
+        with:
+          auto-activate-base: false
+
+      - name: Create Conda environment
+        run: conda env create --file env.yml
+
+      - name: Activate Conda environment and install dependencies
+        run: |
+          source $CONDA/bin/activate intreg_env
+          pip install -e .
+          pip install ./intreg-0.1.tar.gz
+
+      - name: Verify Conda environment
+        run: |
+          source $CONDA/bin/activate intreg_env
+          conda info --all
+          conda list
+
+      - name: Run Pytest and Coverage
+        run: |
+          source $CONDA/bin/activate intreg_env
+          pytest --cov=intreg src/tests/ --cov-report=xml
+
+      - name: Upload Coverage to Codecov
+        uses: codecov/codecov-action@v2
+        with:
+          files: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Install pypa/build
+        run: >-
+          python -m
+          pip install
+          build
+          --user
+
+      - name: Build a binary wheel and a source tarball
+        run: >-
+          python -m
+          build
+          --sdist
+          --wheel
+          --outdir dist/
+          .
+
+      - name: Publish a Python distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
