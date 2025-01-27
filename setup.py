@@ -14,8 +14,8 @@ setup(
     package_dir={"": "src"},
     python_requires=">=3.6",
     install_requires=[
-        "numpy>=1.21.1", 
-        "scipy>=1.8.0,<1.12.0",
+        "numpy==1.21.1", 
+        "scipy==1.15.1",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
