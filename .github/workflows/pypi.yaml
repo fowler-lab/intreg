@@ -1,25 +1,27 @@
-name: Build and release PyPI
-#Based on the similar action for `gumpy`
+name: Build and Release to PyPI
 
-#Ensure this only runs when (pre)released
+# Trigger workflow on release or prerelease
 on:
   release:
     types: [released, prereleased]
 
 jobs:
   build:
-    name: Publish release to PyPi
+    name: Publish Release to PyPI
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Check out the repository code
       - name: Check out repository code
         uses: actions/checkout@v2
 
+      # Step 2: Set up Miniconda
       - name: Set up Conda
         uses: conda-incubator/setup-miniconda@v2
         with:
           auto-activate-base: false
 
+      # Step 3: Create and activate Conda environment
       - name: Create Conda environment
         run: conda env create --file env.yml
 
@@ -27,42 +29,46 @@ jobs:
         run: |
           source $CONDA/bin/activate intreg_env
           pip install -e .
-          pip install ./intreg-0.1.tar.gz
 
+      # Step 4: Verify Conda environment
       - name: Verify Conda environment
         run: |
           source $CONDA/bin/activate intreg_env
           conda info --all
           conda list
 
+      # Step 5: Run Pytest and generate test coverage
       - name: Run Pytest and Coverage
         run: |
           source $CONDA/bin/activate intreg_env
           pytest --cov=intreg src/tests/ --cov-report=xml
 
+      # Step 6: Upload test coverage to Codecov
       - name: Upload Coverage to Codecov
         uses: codecov/codecov-action@v2
         with:
           files: ./coverage.xml
           token: ${{ secrets.CODECOV_TOKEN }}
 
-      - name: Install pypa/build
-        run: >-
-          python -m
-          pip install
-          build
-          --user
+      # Step 7: Install build tools
+      - name: Install build tools
+        run: pip install build
 
-      - name: Build a binary wheel and a source tarball
-        run: >-
-          python -m
-          build
-          --sdist
-          --wheel
-          --outdir dist/
-          .
+      # Step 8: Build a binary wheel and source tarball
+      - name: Build a binary wheel and source tarball
+        run: |
+          python -m build --sdist --wheel --outdir dist/
 
-      - name: Publish a Python distribution to PyPI
+      # Step 9: Debugging - List contents of dist directory
+      - name: List contents of dist directory
+        run: ls -al dist/
+
+      # Step 10: Install the package from the built tarball
+      - name: Install the package from the tarball
+        run: pip install dist/*.tar.gz
+
+      # Step 11: Publish package to PyPI
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           user: __token__
