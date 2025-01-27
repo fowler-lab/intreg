@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="intreg",
-    version="0.1.72",
+    version="0.1.8",
     author="Dylan Adlard, Philip W Fowler",
     author_email="philip.fowler@ndm.ox.ac.uk",
     description="A package for fitting an interval and mixed effect interval regression model to censored and/or uncensored point and/or interval data",
