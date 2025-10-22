@@ -13,66 +13,83 @@ class IntReg:
         y_upper (array-like): Upper bound values of the intervals.
     """
 
-    def __init__(self, y_lower, y_upper):
+    def __init__(self, y_lower, y_upper, weights=None):
         """
         Initialize model with data.
 
         Args:
             y_lower (array-like): Lower bounds of the intervals. Use -np.inf for left-censored values.
             y_upper (array-like): Upper bounds of the intervals. Use np.inf for right-censored values.
+            weights (array-like or None): Optional frequency weights for each observation.
         """
         self.y_lower = y_lower
         self.y_upper = y_upper
 
-    def log_L(self, params):
+        self.weights = np.ones_like(self.y_lower) if weights is None else np.asarray(weights)
+
+
+    @staticmethod
+    def interval_prob(y_low, y_high, mu, sigma):
         """
-        Compute the negative log-likelihood for the interval regression model.
+        Compute the per-observation probability for interval-censored data,
+        handling point, left-, right-, and interval-censoring.
 
         Args:
-            params (array-like): Parameters to estimate. The first element is mu (mean), and the second is
-            log(sigma) (log standard deviation to ensure positivity).
+            y_low (array-like): Lower interval bounds (may include -np.inf for left-censored).
+            y_high (array-like): Upper interval bounds (may include np.inf for right-censored).
+            mu (float): Mean of the normal distribution.
+            sigma (float): Standard deviation (must be > 0).
 
         Returns:
-            float: Negative log-likelihood value.
+            np.ndarray: Probability (PDF or CDF difference) per observation, shape (n,).
         """
-        # mu can be a scalar (for all observations) or vector (for each observation)
-        mu = params[0]
-        # sigma is optimized as log(sigma) to ensure positivity
-        sigma = np.maximum(np.exp(params[1]), 1e-10)
+        y_low = np.asarray(y_low, dtype=float)
+        y_high = np.asarray(y_high, dtype=float)
+        sigma = np.maximum(sigma, 1e-10)
 
-        log_L = 0
+        # Identify censoring types
+        points = (y_low == y_high)
+        left_cens = np.isneginf(y_low)
+        right_cens = np.isposinf(y_high)
+        interval_cens = ~(points | left_cens | right_cens)
 
-        # likelihood function for point data
-        points = self.y_upper == self.y_lower
+        p = np.zeros_like(y_low, dtype=float)
+
+        # Point (exact) observations: PDF
         if np.any(points):
-            w = (self.y_upper[points] - mu) ** 2 / sigma**2
-            log_L += -0.5 * np.sum(w + np.log(2 * np.pi * sigma**2))
+            p[points] = norm.pdf(y_high[points], mu, sigma)
 
-        # likelihood function for left-censored values
-        left_censored = np.isin(self.y_lower, -np.inf)
-        if np.any(left_censored):
-            log_L += np.sum(norm.logcdf((self.y_upper[left_censored] - mu) / sigma))
+        # Left-censored observations: CDF
+        if np.any(left_cens):
+            p[left_cens] = norm.cdf((y_high[left_cens] - mu) / sigma)
 
-        # likelihood function for right-censored values
-        right_censored = np.isin(self.y_upper, np.inf)
-        if np.any(right_censored):
-            log_L += np.sum(
-                np.log(1 - norm.cdf((self.y_lower[right_censored] - mu) / sigma))
+        # Right-censored observations: survival function (1 - CDF)
+        if np.any(right_cens):
+            p[right_cens] = 1 - norm.cdf((y_low[right_cens] - mu) / sigma)
+
+        # Interval-censored → CDF difference
+        if np.any(interval_cens):
+            p[interval_cens] = (
+                norm.cdf((y_high[interval_cens] - mu) / sigma)
+                - norm.cdf((y_low[interval_cens] - mu) / sigma)
             )
 
-        # likelihood function for intervals
-        interval_censored = ~left_censored & ~right_censored & ~points
-        if np.any(interval_censored):
-            log_L += np.sum(
-                np.log(
-                    norm.cdf((self.y_upper[interval_censored] - mu) / sigma)
-                    - norm.cdf((self.y_lower[interval_censored] - mu) / sigma)
-                )
-            )
+        # Avoid underflow / log(0)
+        p = np.clip(p, 1e-300, 1.0)
+        return p
+
+
+    def log_L(self, params):
+        mu = params[0]
+        sigma = np.maximum(np.exp(params[1]), 1e-10)
+        p = IntReg.interval_prob(self.y_lower, self.y_upper, mu, sigma)
+        log_L = np.sum(self.weights * np.log(p))
+
         if hasattr(self, "L2_penalties") and len(self.L2_penalties) > 0:
             log_L = self._apply_L2_regularisation(log_L, params)
 
         return -log_L
+
 
     def _apply_L2_regularisation(self, log_L, params):
         """
