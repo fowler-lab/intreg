@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from intreg.intreg import IntReg
+from intreg import IntReg
 from scipy.optimize import OptimizeResult
 from scipy.stats import norm
 

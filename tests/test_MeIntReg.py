@@ -1,6 +1,6 @@
 import pytest
 import numpy as np
-from intreg.meintreg import MeIntReg
+from intreg import MeIntReg
 from scipy.optimize import OptimizeResult
 
 

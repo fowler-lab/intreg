@@ -1,3 +1,36 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "intreg"
+version = "0.2.1"
+description = "A package for fitting an interval and mixed effect interval regression model to censored and/or uncensored point and/or interval data"
+readme = "README.md"
+authors = [
+    { name = "Dylan Adlard", email = "dylan.adlard@ndm.ox.ac.uk" },
+    { name = "Philip W Fowler" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["interval regression", "mixed effects"]
+classifiers = [
+    "Programming Language :: Python :: 3"
+]
+dependencies = [
+    "numpy",
+    "scipy",
+]
+
+[project.urls]
+Homepage = "https://github.com/fowler-lab/intreg"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
