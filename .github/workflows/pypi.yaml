@@ -41,7 +41,7 @@ jobs:
       - name: Run Pytest and Coverage
         run: |
           source $CONDA/bin/activate intreg_env
-          pytest --cov=intreg src/tests/ --cov-report=xml
+          pytest --cov=intreg tests/ --cov-report=xml
 
       # Step 6: Upload test coverage to Codecov
       - name: Upload Coverage to Codecov
