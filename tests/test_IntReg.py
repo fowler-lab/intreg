@@ -184,3 +184,32 @@ def test_clear_interval_censored_data_fit(clear_interval_censored_data):
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 3, atol=1e-1)  # Expect mu around 2.5
     assert np.isclose(result.x[1], 0.08, atol=1e-1)  # Expect log(sigma) = 0.08
+
+
+def test_regularisation():
+    y_lower = np.array([1, 2, 3])
+    y_upper = np.array([1, 2, 3])
+    model = IntReg(y_lower, y_upper)
+
+    model.L2_penalties = {"lambda_beta": 2.0, "lambda_sigma": 4.0, "n_fixed": 1}
+    params = np.array([2.0, -1.0])  # mu, log_sigma
+    unpenalised = -5.0
+    direct = model._apply_L2_regularisation(unpenalised, params)
+
+    # expected penalties:
+    # beta:  (2/3) * 4 = 8/3
+    # sigma: (4/3) * 1 = 4/3
+    expected = unpenalised - (8/3 + 4/3)
+    assert np.isclose(direct, expected)
+
+    # ----- verify log_L applies penalties -----
+    no_penalty = IntReg(y_lower, y_upper).log_L(params)
+    model.L2_penalties = {"lambda_beta": 100.0, "lambda_sigma": 0.0, "n_fixed": 1}
+    with_penalty = model.log_L(params)
+    assert with_penalty > no_penalty  # penalty makes negative log-likelihood larger
+
+    # ----- verify fit() runs with penalties -----
+    model = IntReg(y_lower, y_upper)
+    model.fit(L2_penalties={"lambda_beta": 1.0, "lambda_sigma": 1.0, "n_fixed": 1})
+    assert hasattr(model, "result")
+    assert model.result.x is not None 

@@ -154,14 +154,15 @@ def test_left_censored_data_fit(left_censored_data):
     assert np.isclose(result.x[0], -0.5, atol=1e-1)
     assert np.isclose(result.x[1], 1, atol=1e-1)
 
+
 def test_right_censored_data_fit(right_censored_data):
     y_lower, y_upper, X, random_effects = right_censored_data
     model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
     result = model.result
-    print (result.x[0], result.x[1])
+    print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 1.2, atol=1e-1) 
-    assert np.isclose(result.x[1], 1.1, atol=1e-1) 
+    assert np.isclose(result.x[0], 1.2, atol=1e-1)
+    assert np.isclose(result.x[1], 1.1, atol=1e-1)
 
 
 def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
@@ -170,8 +171,9 @@ def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
     result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 1.7, atol=1e-1)  
-    assert np.isclose(result.x[1], 0.4, atol=1e-1) 
+    assert np.isclose(result.x[0], 1.7, atol=1e-1)
+    assert np.isclose(result.x[1], 0.4, atol=1e-1)
+
 
 def test_clear_interval_censored_data_fit(clear_interval_censored_data):
     y_lower, y_upper, X, random_effects = clear_interval_censored_data
@@ -179,5 +181,42 @@ def test_clear_interval_censored_data_fit(clear_interval_censored_data):
     result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 1.5, atol=1e-1)  
-    assert np.isclose(result.x[1], 1, atol=1e-1)  
+    assert np.isclose(result.x[0], 1.5, atol=1e-1)
+    assert np.isclose(result.x[1], 1, atol=1e-1)
+
+
+def test_meintreg_regularisation():
+    y_low = np.array([1.0, 1.0, 2.0, 2.0])
+    y_high = y_low.copy()  # exact values
+    X = np.ones((4, 1))  # intercept-only fixed effect
+    groups = np.array([0, 0, 1, 1])  # random intercept groups
+    model = MeIntReg(y_low, y_high, X, random_effects=groups)
+    model.L2_penalties = {
+        "lambda_beta": 2.0,
+        "lambda_u": 3.0,
+        "lambda_sigma": 4.0,
+    }
+    # params = [beta, u0, u1, log_sigma]
+    params = np.array([1.5, 0.5, -0.5, -1.0])
+    unpen = -10.0
+
+    # expected penalties:
+    # N = 4
+    # beta penalty: (2/4)*(1.5^2)      = (0.5)*2.25 = 1.125
+    # u penalty:    (3/4)*(0.5^2+(-0.5)^2) = 0.75*(0.25+0.25)=0.75*0.5 = 0.375
+    # sigma pen:    (4/4)*(1.0^2)      = 1.0
+    expected = unpen - (1.125 + 0.375 + 1.0)
+
+    direct = model._apply_L2_regularisation(unpen, params)
+    assert np.isclose(direct, expected)
+    
+    #  check that log_L applies penalties
+    no_penalty = MeIntReg(y_low, y_high, X, groups).log_L(params)
+    model.L2_penalties = {"lambda_beta": 50.0, "lambda_u": 50.0, "lambda_sigma": 0.0}
+    with_penalty = model.log_L(params)
+    assert with_penalty > no_penalty  # more penalty → larger negative log-likelihood
+
+    model = MeIntReg(y_low, y_high, X, groups)
+    model.fit(L2_penalties={"lambda_beta": 1.0, "lambda_u": 1.0, "lambda_sigma": 1.0})
+    assert hasattr(model, "result")
+    assert model.result.x is not None 

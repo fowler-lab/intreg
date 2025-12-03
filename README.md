@@ -71,9 +71,9 @@ y_lower = np.array([1.0, 2.0, -np.inf, 3.0])
 y_upper = np.array([1.0, 2.5, 1.5, np.inf])
 
 model = IntReg(y_lower, y_upper)
-result = model.fit()
+model.fit()
 
-print(result.result.x)  # estimated [mu, log_sigma]
+print(model.result.x)  # estimated [mu, log_sigma]
 ```
 
 ### 2. Mixed-Effects Interval Regression (`MeIntReg`)
@@ -89,9 +89,9 @@ X = np.column_stack([np.ones(4)])  # intercept-only model
 groups = np.array([0, 0, 1, 1])
 
 model = MeIntReg(y_low, y_high, X, random_effects=groups)
-result = model.fit()
+model.fit()
 
-print(result.x)  # [beta, random_effects, log_sigma]
+print(model.result.x)  # [beta, random_effects, log_sigma]
 ```
 
 ---
