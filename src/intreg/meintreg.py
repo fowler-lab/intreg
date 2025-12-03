@@ -6,13 +6,14 @@ from scipy.stats import norm
 class MeIntReg:
     """
     Mixed-effects interval regression for censored, uncensored, and interval-censored data,
-    using maximum likelihood estimation.
+    using maximum likelihood estimation under a normal model.
 
     Attributes:
         y_lower (array-like): Lower bound values of the intervals.
         y_upper (array-like): Upper bound values of the intervals.
         X (array-like): Covariate matrix for fixed effects.
-        random_effects (array-like): Labels for random effects.
+        random_effects (array-like or None): Group labels determining random-effect membership.
+        n_random_effects (int): Number of unique random-effect groups.
     """
 
     def __init__(self, y_lower, y_upper, X, random_effects=None):
@@ -23,7 +24,8 @@ class MeIntReg:
             y_lower (array-like): Lower bounds of the intervals. Use -np.inf for left-censored values.
             y_upper (array-like): Upper bounds of the intervals. Use np.inf for right-censored values.
             X (array-like): Covariate matrix for fixed effects.
-            random_effects (array-like, optional): labels for grouping random effects. Defaults to None.
+            random_effects (array-like, optional): Group labels for random intercepts.
+                If None, the model includes only fixed effects.
         """
         self.y_lower = y_lower
         self.y_upper = y_upper
@@ -40,19 +42,28 @@ class MeIntReg:
         self, params: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
         """
-        Extract fixed effects (beta), random effects (u), and compute the combined mean (mu).
+        Extract fixed effects (beta), random effects (u), and compute the linear predictor (mu).
+
+        If random effects, mu is:
+
+            mu = X @ beta + u[group_index]
+
+        Otherwise:
+
+            mu = X @ beta.
 
         Args:
-            params (array-like): Parameters containing beta, random effects, and log(sigma).
+            params (array-like): Parameter vector containing beta, random effects,
+                and log(sigma).
 
         Returns:
-            tuple: (beta, u, mu), where:
-                beta (array): Fixed effects coefficients.
-                u (array): Random effects.
-                mu (array): Combined mean for each observation.
+            tuple: (beta, u, mu)
+                beta (array): Fixed-effect coefficients.
+                u (array or None): Random-effect coefficients (or None if not included).
+                mu (array): Mean for each observation given fixed and random effects.
         """
         n_fixed = self.X.shape[1]
-        beta = params[:n_fixed] 
+        beta = params[:n_fixed]
 
         if self.random_effects is not None:
             u = params[n_fixed : n_fixed + self.n_random_effects]
@@ -67,12 +78,15 @@ class MeIntReg:
         """
         Compute the negative log-likelihood for the mixed-effects interval regression model.
 
+        Censored, uncensored, and interval-censored contributions are computed
+        using normal PDF/CDF relationships. Random intercepts shift the mean
+        according to group membership.
+
         Args:
-            params (array-like): Parameters to estimate. The first elements are beta (fixed effects coefficients),
-            followed by the random effects, and the last element is log(sigma).
+            params (array-like): Parameters to be estimated: [beta, u, log(sigma)].
 
         Returns:
-            float: Negative log-likelihood value.
+            float: Negative log-likelihood (with optional L2 penalties).
         """
         _, _, mu = self._compute_effects(params)
         sigma = np.maximum(
@@ -127,24 +141,27 @@ class MeIntReg:
 
     def _apply_L2_regularisation(self, log_L, params):
         """
-        Apply L2 regularization penalties to the log-likelihood with automatic scaling.
+        Apply L2 regularization (ridge penalties) to the log-likelihood.
+        Each penalty is scaled by the number of observations.
 
         Args:
-            log_L (float): Log-likelihood value.
-            params (array-like): Model parameters (beta, random effects, log(sigma)).
+            log_L (float): Unpenalized log-likelihood value.
+            params (array-like): Model parameters [beta, u, log(sigma)].
 
         Returns:
-            float: Regularized log-likelihood.
+            float: Regularized log-likelihood value.
         """
         lambda_beta = self.L2_penalties.get("lambda_beta", 0.0)
         lambda_u = self.L2_penalties.get("lambda_u", 0.0)
-        lambda_sigma = self.L2_penalties.get("lambda_sigma", 0.0)  # New regularization term
+        lambda_sigma = self.L2_penalties.get(
+            "lambda_sigma", 0.0
+        )  # New regularization term
 
         N = self.X.shape[0]
 
         n_fixed = self.X.shape[1]
-        beta = params[:n_fixed] 
-        u = params[n_fixed : n_fixed + self.n_random_effects] 
+        beta = params[:n_fixed]
+        u = params[n_fixed : n_fixed + self.n_random_effects]
         log_sigma = params[-1]
 
         # Compute scaled L2 penalties
@@ -155,16 +172,16 @@ class MeIntReg:
         # Combine likelihood and regularization penalties
         return log_L - penalty_beta - penalty_u - penalty_sigma
 
-
     def _initial_params(self):
         """
-        Generate automatic initial guesses for parameters.
+        Generate automatic initial values for all parameters.
 
-        Uses linear regression coefficients as initial guesses for beta, zeros for random effects,
-        and the log of the standard deviation of the midpoints for log(sigma).
+        Initial beta is obtained from a least-squares regression of the finite
+        midpoints of the intervals on X. Random effects are initialized to zero.
+        The standard deviation of the finite midpoints is used to initialize log(sigma).
 
         Returns:
-            array: Initial guess for [beta, random effects, log(sigma)].
+            array: Initial parameter vector [beta, random effects, log(sigma)].
         """
         # Mean of uncensored data for initial beta estimate
         midpoints = (self.y_lower + self.y_upper) / 2.0
@@ -198,23 +215,32 @@ class MeIntReg:
         """
         Fit the mixed-effects interval regression model using maximum likelihood estimation.
 
+        If no initial parameters are supplied, they are generated automatically.
+        Optional L2 penalties may be applied to fixed effects, random effects,
+        and log(sigma).
+
         Args:
-            method (str, optional): Optimization method to use. Defaults to "BFGS".
-            initial_params (array-like, optional): Initial guesses for beta, random effects, and log(sigma).
-                If None, automatic initial guesses are generated.
-            bounds (array-like, optional): bounds for fixed and random effects, and for sigma
-            options (dict, optional): scipy minimisation options dictionary
-            L2_penalties (dict or None): Regularisation strengths for fixed and random effects {lambda_beta:..., lambda_u:...}. Defaults to None
+            method (str, optional): Optimization method passed to scipy.optimize.minimize.
+                Defaults to "BFGS".
+            initial_params (array-like, optional): Initial values for
+                [beta, random effects, log(sigma)]. If None, automatic initial
+                guesses are generated.
+            bounds (array-like, optional): Parameter bounds passed directly to
+                minimize, applying in order to all parameters.
+            options (dict, optional): Options dictionary for the optimizer.
+            L2_penalties (dict or None): Optional L2 regularisation strengths,
+                e.g. {"lambda_beta": ..., "lambda_u": ..., "lambda_sigma": ...}.
+                Defaults to None.
 
         Returns:
-            OptimizeResult: The result of the optimization process containing the estimated parameters.
+            MeIntReg: The fitted model instance, with the optimization result.
         """
         self.L2_penalties = L2_penalties or {}
 
         if initial_params is None:
             initial_params = self._initial_params()
 
-        result = minimize(
+        self.result = minimize(
             self.log_L, initial_params, method=method, bounds=bounds, options=options
         )
-        return result
+        return self

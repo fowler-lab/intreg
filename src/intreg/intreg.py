@@ -6,21 +6,22 @@ from scipy.stats import norm
 class IntReg:
     """
     Interval regression for censored, uncensored, and interval-censored data,
-    using maximum likelihood estimation.
+    using maximum likelihood estimation under a normal model.
 
     Attributes:
-        y_lower (array-like): Lower bound values of the intervals.
-        y_upper (array-like): Upper bound values of the intervals.
+        y_lower (array-like): Lower bound values of the observed intervals.
+        y_upper (array-like): Upper bound values of the observed intervals.
+        weights (array-like): Optional observation weights (defaults to 1 for all observations).
     """
 
     def __init__(self, y_lower, y_upper, weights=None):
         """
-        Initialize model with data.
+        Initialize the model with interval-bound data.
 
         Args:
             y_lower (array-like): Lower bounds of the intervals. Use -np.inf for left-censored values.
             y_upper (array-like): Upper bounds of the intervals. Use np.inf for right-censored values.
-            weights (array-like or None): Optional frequency weights for each observation.
+            weights (array-like or None): Optional frequency or sampling weights. If None, all weights equal 1.
         """
         self.y_lower = y_lower
         self.y_upper = y_upper
@@ -31,17 +32,19 @@ class IntReg:
     @staticmethod
     def interval_prob(y_low, y_high, mu, sigma):
         """
-        Compute the per-observation probability for interval-censored data,
-        handling point, left-, right-, and interval-censoring.
+        Compute the likelihood contribution for each observation, covering exact,
+        left-censored, right-censored, and interval-censored outcomes under a
+        normal distribution.
 
         Args:
-            y_low (array-like): Lower interval bounds (may include -np.inf for left-censored).
-            y_high (array-like): Upper interval bounds (may include np.inf for right-censored).
+            y_low (array-like): Lower interval bounds (may include -np.inf).
+            y_high (array-like): Upper interval bounds (may include np.inf).
             mu (float): Mean of the normal distribution.
-            sigma (float): Standard deviation (must be > 0).
+            sigma (float): Standard deviation (must be > 0; automatically clipped).
 
         Returns:
-            np.ndarray: Probability (PDF or CDF difference) per observation, shape (n,).
+            np.ndarray: Likelihood contribution (density or probability) per
+                observation, shape (n,). Values are clipped to avoid underflow.
         """
         y_low = np.asarray(y_low, dtype=float)
         y_high = np.asarray(y_high, dtype=float)
@@ -80,6 +83,19 @@ class IntReg:
 
 
     def log_L(self, params):
+        """
+        Compute the negative log-likelihood for the interval regression model.
+
+        The parameter vector is interpreted as:
+            params[0] = mu
+            params[1] = log(sigma)
+
+        Args:
+            params (array-like): Model parameters [mu, log_sigma].
+
+        Returns:
+            float: Negative log-likelihood (with optional regularisation).
+        """
         mu = params[0]
         sigma = np.maximum(np.exp(params[1]), 1e-10)
         p = IntReg.interval_prob(self.y_lower, self.y_upper, mu, sigma)
@@ -93,11 +109,14 @@ class IntReg:
 
     def _apply_L2_regularisation(self, log_L, params):
         """
-        Apply L2 regularization penalties to the log-likelihood with automatic scaling.
+        Apply L2 (ridge) penalties to the log-likelihood.
+        These penalties are scaled by the number of observations.
 
         Args:
-            log_L (float): Log-likelihood value.
-            params (array-like): Model parameters [beta, ..., log_sigma].
+            log_L (float): Unpenalized log-likelihood.
+            params (array-like): Parameter vector, where the first n_fixed
+                parameters are penalized as 'beta' and the final parameter is
+                log(sigma).
 
         Returns:
             float: Regularized log-likelihood.
@@ -118,13 +137,14 @@ class IntReg:
 
     def _initial_params(self):
         """
-        Generate automatic initial guesses for mu (mean) and log(sigma).
+        Generate automatic initial guesses for mu and log(sigma).
 
-        Uses the mean of the midpoints (uncensored data) for mu and the standard deviation of the
-        midpoints for sigma (log-transformed to ensure positivity).
+        Midpoints of the intervals are used, and only finite midpoints
+        contribute to the initial estimates. The mean of finite midpoints is
+        mu, and their standard deviation (log-transformed) is log(sigma).
 
         Returns:
-            array: Initial guess for [mu, log(sigma)].
+            array: Initial parameter vector [mu, log(sigma)].
         """
         # Mean of uncensored data
         midpoints = (self.y_lower + self.y_upper) / 2.0
@@ -146,7 +166,13 @@ class IntReg:
         L2_penalties=None,
     ):
         """
-        Fit the mixed-effects interval regression model using maximum likelihood estimation.
+        Fit the interval regression model by maximum likelihood estimation.
+
+        The optimization is performed over the parameters:
+            [mu, log(sigma)]
+
+        Initial parameters are either user-supplied or generated automatically.
+        Optional L2 penalties may be applied to mu and/or log-sigma.
 
         Args:
             method (str, optional): Optimization method to use. Defaults to "BFGS".
@@ -157,15 +183,15 @@ class IntReg:
             L2_penalties (dict or None): Regularisation strengths for fixed and random effects {lambda_beta:..., lambda_u:...}. Defaults to None
 
         Returns:
-            OptimizeResult: The result of the optimization process containing the estimated parameters.
+            IntReg: The fitted model instance containing the `result` attribute.
         """
         self.L2_penalties = L2_penalties or {}
 
         if initial_params is None:
             initial_params = self._initial_params()
 
-        result = minimize(
+        self.result = minimize(
             self.log_L, initial_params, method=method, bounds=bounds, options=options
         )
 
-        return result
+        return self

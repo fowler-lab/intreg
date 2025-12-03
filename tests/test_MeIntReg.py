@@ -136,8 +136,8 @@ def test_log_L(
 
 def test_simple_point_data_fit(simple_point_data):
     y_lower, y_upper, X, random_effects = simple_point_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects)
-    result = model.fit()
+    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
+    result = model.result
     print(result)
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
@@ -147,8 +147,8 @@ def test_simple_point_data_fit(simple_point_data):
 
 def test_left_censored_data_fit(left_censored_data):
     y_lower, y_upper, X, random_effects = left_censored_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects)
-    result = model.fit()
+    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
+    result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], -0.5, atol=1e-1)
@@ -156,8 +156,8 @@ def test_left_censored_data_fit(left_censored_data):
 
 def test_right_censored_data_fit(right_censored_data):
     y_lower, y_upper, X, random_effects = right_censored_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects)
-    result = model.fit()
+    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
+    result = model.result
     print (result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 1.2, atol=1e-1) 
@@ -166,8 +166,8 @@ def test_right_censored_data_fit(right_censored_data):
 
 def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
     y_lower, y_upper, X, random_effects = mixed_interval_and_point_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects)
-    result = model.fit()
+    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
+    result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 1.7, atol=1e-1)  
@@ -175,8 +175,8 @@ def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
 
 def test_clear_interval_censored_data_fit(clear_interval_censored_data):
     y_lower, y_upper, X, random_effects = clear_interval_censored_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects)
-    result = model.fit()
+    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
+    result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 1.5, atol=1e-1)  

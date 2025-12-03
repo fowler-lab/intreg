@@ -139,8 +139,8 @@ def test_log_L(
 
 def test_simple_point_data_fit(simple_point_data):
     y_lower, y_upper = simple_point_data
-    model = IntReg(y_lower, y_upper)
-    result = model.fit()
+    model = IntReg(y_lower, y_upper).fit()
+    result = model.result
     print (result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 1.3, atol=1e-1)  # Expect mu near 1
@@ -149,8 +149,8 @@ def test_simple_point_data_fit(simple_point_data):
 
 def test_left_censored_data_fit(left_censored_data):
     y_lower, y_upper = left_censored_data
-    model = IntReg(y_lower, y_upper)
-    result = model.fit()
+    model = IntReg(y_lower, y_upper).fit()
+    result = model.result
     print (result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 0.9, atol=1e-1)  # Expect mu near 0.9
@@ -159,8 +159,8 @@ def test_left_censored_data_fit(left_censored_data):
 
 def test_right_censored_data_fit(right_censored_data):
     y_lower, y_upper = right_censored_data
-    model = IntReg(y_lower, y_upper)
-    result = model.fit()
+    model = IntReg(y_lower, y_upper).fit()
+    result = model.result
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 2, atol=1e-1)  # Expect mu near 1.5
     assert np.isclose(result.x[1], -1.9, atol=1e-1)  # Expect sigma near -1.9
@@ -168,8 +168,8 @@ def test_right_censored_data_fit(right_censored_data):
 
 def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
     y_lower, y_upper = mixed_interval_and_point_data
-    model = IntReg(y_lower, y_upper)
-    result = model.fit()
+    model = IntReg(y_lower, y_upper).fit()
+    result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 2.3, atol=1e-1)  # Expect mu around 2.5
@@ -178,8 +178,8 @@ def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
 
 def test_clear_interval_censored_data_fit(clear_interval_censored_data):
     y_lower, y_upper = clear_interval_censored_data
-    model = IntReg(y_lower, y_upper)
-    result = model.fit()
+    model = IntReg(y_lower, y_upper).fit()
+    result = model.result
     print(result.x[0], result.x[1])
     assert isinstance(result, OptimizeResult)
     assert np.isclose(result.x[0], 3, atol=1e-1)  # Expect mu around 2.5
