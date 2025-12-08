@@ -39,7 +39,7 @@ The package exposes two core classes:
 | Class          | Description                                                                 |
 | -------------- | --------------------------------------------------------------------------- |
 | **`IntReg`**   | Interval regression without random effects. Handles all types of censoring. |
-| **`MeIntReg`** | Mixed-effects interval regression with random intercepts.                   |
+| **`MeIntReg`** | Mixed-effects interval regression with random intercepts                    |
 
 Both models:
 
