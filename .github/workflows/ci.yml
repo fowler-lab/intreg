@@ -34,6 +34,11 @@ jobs:
           source $CONDA/bin/activate intreg_env
           pytest --cov=intreg tests/ --cov-report=xml
 
+            - name: Run mypy
+      - run: |
+          source $CONDA/bin/activate intreg_env
+          mypy --strict src/intreg
+
       - name: Upload Coverage to Codecov
         uses: codecov/codecov-action@v2
         with:

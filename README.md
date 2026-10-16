@@ -1,5 +1,4 @@
-[![codecov](https://codecov.io/gh/fowler-lab/intreg/branch/main/graph/badge.svg?token=EECMnKifvc)](https://codecov.io/gh/fowler-lab/intreg)
-[![DOI](https://zenodo.org/badge/856350662.svg)](https://doi.org/10.5281/zenodo.14889276)
+[![codecov](https://codecov.io/gh/fowler-lab/intreg/branch/main/graph/badge.svg?token=EECMnKifvc)](https://codecov.io/gh/fowler-lab/intreg) [![DOI](https://zenodo.org/badge/856350662.svg)](https://doi.org/10.5281/zenodo.14889276) [![CI](https://github.com/fowler-lab/intreg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/fowler-lab/intreg/actions/workflows/ci.yml)
 
 # intreg
 
@@ -36,8 +35,8 @@ pip install -e .
 
 The package exposes two core classes:
 
-| Class          | Description                                                                 |
-| -------------- | --------------------------------------------------------------------------- |
+| Class                  | Description                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
 | **`IntReg`**   | Interval regression without random effects. Handles all types of censoring. |
 | **`MeIntReg`** | Mixed-effects interval regression with random intercepts                    |
 
