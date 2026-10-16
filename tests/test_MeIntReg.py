@@ -103,6 +103,71 @@ def test_initial_params_without_random_effects(simple_point_data):
     assert np.all(np.isfinite(initial_params))
 
 
+def test_frequency_weights_match_repeated_observations():
+    """Test integer weights give the same likelihood as repeated rows."""
+    y_lower = np.array([0.0, 1.0, 2.0])
+    y_upper = np.array([0.0, 1.0, 2.0])
+    X = np.array([[1.0, 0.0], [1.0, 1.0], [1.0, 2.0]])
+    groups = np.array(["a", "a", "b"])
+    weights = np.array([2.0, 3.0, 1.0])
+    params = np.array([0.5, 0.6, np.log(0.8), np.log(0.4)])
+
+    weighted_model = MeIntReg(
+        y_lower, y_upper, X, random_effects=groups, weights=weights
+    )
+    repeated_model = MeIntReg(
+        np.repeat(y_lower, weights.astype(int)),
+        np.repeat(y_upper, weights.astype(int)),
+        np.repeat(X, weights.astype(int), axis=0),
+        random_effects=np.repeat(groups, weights.astype(int)),
+    )
+
+    assert np.isclose(
+        weighted_model.log_L(params), repeated_model.log_L(params), atol=1e-10
+    )
+
+
+def test_frequency_weights_are_used_for_initial_values():
+    """Test weighted least squares and midpoint spread initialize the model."""
+    y = np.array([0.0, 2.0, 10.0])
+    X = np.column_stack([np.ones(3), [0.0, 1.0, 2.0]])
+    weights = np.array([1.0, 3.0, 2.0])
+    model = MeIntReg(y, y, X, weights=weights)
+
+    params = model._initial_params()
+    sqrt_weights = np.sqrt(weights)
+    expected_beta = np.linalg.lstsq(
+        X * sqrt_weights[:, None], y * sqrt_weights, rcond=None
+    )[0]
+    weighted_mean = np.average(y, weights=weights)
+    expected_sigma = np.sqrt(np.average((y - weighted_mean) ** 2, weights=weights))
+
+    assert np.allclose(params[: X.shape[1]], expected_beta)
+    assert np.isclose(params[-1], np.log(expected_sigma))
+
+
+def test_initial_values_handle_no_finite_midpoints_or_positive_weights():
+    """Test starting values fall back when weighted midpoints are unavailable."""
+    censored_model = MeIntReg(
+        [-np.inf, -np.inf], [0.0, np.inf], np.ones((2, 1))
+    )
+    assert np.allclose(censored_model._initial_params(), [0.0, 0.0])
+
+    zero_weight_model = MeIntReg(
+        [1.0, 2.0], [1.0, 2.0], np.ones((2, 1)), weights=[0.0, 0.0]
+    )
+    assert np.all(np.isfinite(zero_weight_model._initial_params()))
+
+
+def test_invalid_frequency_weights_raise_error(simple_point_data):
+    """Test observation weights must match the data and be non-negative."""
+    y_lower, y_upper, X, _ = simple_point_data
+    with pytest.raises(ValueError, match="same length"):
+        MeIntReg(y_lower, y_upper, X, weights=[1.0])
+    with pytest.raises(ValueError, match="non-negative"):
+        MeIntReg(y_lower, y_upper, X, weights=[1.0, -1.0, 1.0])
+
+
 def test_no_random_effects_likelihood_gradient_and_hessian():
     """Test likelihood derivatives when the model has no random effects."""
     y_lower = np.array([1.0, -np.inf, 2.0, 0.0])

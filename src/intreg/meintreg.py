@@ -46,6 +46,7 @@ class MeIntReg:
         X (np.ndarray): Fixed-effect design matrix.
         random_effects (np.ndarray or None): Encoded group labels, or None
             when the model has no random effects.
+        weights (np.ndarray): Frequency weight for each observation.
         n_random_effects (int): Number of random-effect groups.
         result (OptimizeResult): Optimization result created by `fit`.
     """
@@ -60,6 +61,7 @@ class MeIntReg:
         random_effects: Optional[ArrayLike] = None,
         quadrature_points: int = 20,
         n_jobs: int = -1,
+        weights: Optional[ArrayLike] = None,
     ) -> None:
         """
         Initialize the model.
@@ -77,6 +79,12 @@ class MeIntReg:
             quadrature_points (int): Number of Gauss-Hermite quadrature points
                 used to integrate the random effects. Defaults to 20.
             n_jobs (int): Retained for backwards compatibility.
+            weights (array-like or None): Optional frequency weight for each
+                observation. If None, all observations have weight 1.
+
+        Raises:
+            ValueError: If weights do not match the observation count or
+                contain negative values.
 
         Returns:
             None
@@ -85,12 +93,22 @@ class MeIntReg:
         self.y_lower = np.asarray(y_lower, dtype=float)
         self.y_upper = np.asarray(y_upper, dtype=float)
         self.X = np.asarray(X, dtype=float)
+        self.weights = (
+            np.ones_like(self.y_lower)
+            if weights is None
+            else np.asarray(weights, dtype=float)
+        )
+        if self.weights.shape != self.y_lower.shape:
+            raise ValueError("weights must have the same length as the interval bounds.")
+        if np.any(self.weights < 0):
+            raise ValueError("frequency weights must be non-negative.")
         self.quadrature_points = quadrature_points
         self.n_jobs = n_jobs
 
         self._y_lower = jnp.asarray(self.y_lower)
         self._y_upper = jnp.asarray(self.y_upper)
         self._X = jnp.asarray(self.X)
+        self._weights = jnp.asarray(self.weights)
 
         self.random_effects: Optional[Any] = None
         self.n_random_effects: int = 0
@@ -262,7 +280,8 @@ class MeIntReg:
         interval_ll = self._log_interval_prob(interval_lower, interval_upper)
         interval_ll = jnp.where(interval, interval_ll, 0.0)
 
-        return jnp.sum(point_ll + left_ll + right_ll + interval_ll)
+        observation_loglik = point_ll + left_ll + right_ll + interval_ll
+        return jnp.sum(self._weights[indices] * observation_loglik)
 
     def _group_loglik(
         self, indices: Any, fixed_mu: Any, sigma: Any, tau: Any
@@ -316,7 +335,10 @@ class MeIntReg:
         interval_ll = self._log_interval_prob(interval_lower, interval_upper)
         interval_ll = jnp.where(interval[None, :], interval_ll, 0.0)
 
-        node_loglik = jnp.sum(point_ll + left_ll + right_ll + interval_ll, axis=1)
+        observation_loglik = point_ll + left_ll + right_ll + interval_ll
+        node_loglik = jnp.sum(
+            self._weights[indices][None, :] * observation_loglik, axis=1
+        )
 
         return jsp.special.logsumexp(self._log_gh_weights + node_loglik) - 0.5 * jnp.log(jnp.pi)
 
@@ -408,15 +430,41 @@ class MeIntReg:
             np.ndarray: Initial parameter vector for the model.
         """
 
-        midpoints = (self.y_lower + self.y_upper) / 2.0
-        valid_mask = np.isfinite(midpoints)
+        valid_mask = np.isfinite(self.y_lower) & np.isfinite(self.y_upper)
+        midpoints = np.full_like(self.y_lower, np.nan, dtype=float)
+        midpoints[valid_mask] = (
+            self.y_lower[valid_mask] + self.y_upper[valid_mask]
+        ) / 2.0
 
         X_valid = self.X[valid_mask]
         midpoints_valid = midpoints[valid_mask]
 
-        beta_init = np.linalg.lstsq(X_valid, midpoints_valid, rcond=None)[0]
-
-        sigma_init = max(np.nanstd(midpoints_valid), 1e-6)
+        valid_weights = self.weights[valid_mask]
+        if midpoints_valid.size == 0:
+            beta_init = np.zeros(self.X.shape[1], dtype=float)
+            sigma_init = 1.0
+        elif np.sum(valid_weights) > 0:
+            sqrt_weights = np.sqrt(valid_weights)
+            beta_init = np.linalg.lstsq(
+                X_valid * sqrt_weights[:, None],
+                midpoints_valid * sqrt_weights,
+                rcond=None,
+            )[0]
+            midpoint_mean = np.average(midpoints_valid, weights=valid_weights)
+            sigma_init = max(
+                float(
+                    np.sqrt(
+                        np.average(
+                            (midpoints_valid - midpoint_mean) ** 2,
+                            weights=valid_weights,
+                        )
+                    )
+                ),
+                1e-6,
+            )
+        else:
+            beta_init = np.linalg.lstsq(X_valid, midpoints_valid, rcond=None)[0]
+            sigma_init = max(float(np.nanstd(midpoints_valid)), 1e-6)
         log_sigma_init = np.log(sigma_init)
 
         if self.random_effects is not None:
