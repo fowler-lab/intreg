@@ -1,8 +1,12 @@
+import importlib
+import importlib.metadata
 import pytest
 import numpy as np
+import intreg
 from intreg import IntReg
 from scipy.optimize import OptimizeResult
 from scipy.stats import norm
+from importlib.metadata import PackageNotFoundError
 
 
 @pytest.fixture
@@ -101,6 +105,49 @@ def test_initial_params(
         ), f"Failed for data {y_lower, y_upper}: expected log(sigma) {expected_log_sigma}, got {initial_log_sigma}"
 
 
+def test_initial_params_handles_zero_spread_and_no_finite_midpoints():
+    """Test initial values remain finite for degenerate and censored data."""
+    same_points = np.array([2.0, 2.0, 2.0])
+    model = IntReg(same_points, same_points)
+    initial_params = model._initial_params()
+    assert np.all(np.isfinite(initial_params))
+    assert np.isclose(initial_params[0], 2.0)
+    assert np.isclose(initial_params[1], np.log(1e-6))
+
+    model = IntReg([-np.inf, -np.inf], [0.0, 1.0])
+    initial_params = model._initial_params()
+    assert np.all(np.isfinite(initial_params))
+    assert np.allclose(initial_params, [0.0, 0.0])
+
+
+def test_input_arrays_must_have_matching_lengths():
+    """Test bounds and weights are checked against the observation count."""
+    with pytest.raises(ValueError, match="one-dimensional"):
+        IntReg([[1.0, 2.0]], [[1.0, 2.0]])
+
+    with pytest.raises(ValueError, match="same length"):
+        IntReg([1.0, 2.0], [1.0])
+
+    with pytest.raises(ValueError, match="At least one observation"):
+        IntReg([], [])
+
+    with pytest.raises(ValueError, match="weights"):
+        IntReg([1.0, 2.0], [1.0, 2.0], weights=[1.0])
+
+
+def test_package_version_fallback_when_metadata_is_missing(monkeypatch):
+    """Test package version defaults when distribution metadata is unavailable."""
+    def missing_version(_):
+        raise PackageNotFoundError("intreg")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(importlib.metadata, "version", missing_version)
+        importlib.reload(intreg)
+        assert intreg.__version__ == "0.0.0"
+
+    importlib.reload(intreg)
+
+
 def test_log_L(
     simple_point_data,
     left_censored_data,
@@ -135,6 +182,44 @@ def test_log_L(
         assert (
             log_likelihood > 0
         ), f"log_L output should be positive for {description}, got {log_likelihood}"
+
+
+def test_log_L_is_finite_for_extreme_intervals():
+    """Test log-space likelihood remains finite for narrow tail intervals."""
+    y_lower = np.array([40.0, -np.inf, 40.0])
+    y_upper = np.array([40.000001, 0.0, np.inf])
+    model = IntReg(y_lower, y_upper)
+
+    negative_log_likelihood = model.log_L(np.array([0.0, 0.0]))
+    assert np.isfinite(negative_log_likelihood)
+
+
+def test_interval_log_likelihood_returns_each_observation_contribution():
+    """Test log-likelihood contributions for each censoring type."""
+    y_lower = np.array([1.0, -np.inf, 2.0, 40.0])
+    y_upper = np.array([1.0, 0.0, np.inf, 40.000001])
+    contributions = IntReg.interval_log_likelihood(
+        y_lower, y_upper, mu=0.0, sigma=1.0
+    )
+
+    assert contributions.shape == y_lower.shape
+    assert np.all(np.isfinite(contributions))
+    assert np.isclose(contributions[0], norm.logpdf(1.0))
+    assert np.isclose(contributions[1], norm.logcdf(0.0))
+    assert np.isclose(contributions[2], norm.logsf(2.0))
+
+
+def test_interval_prob_remains_compatible_with_log_likelihood_method():
+    """Test the probability-scale helper remains available for existing callers."""
+    y_lower = np.array([1.0, -np.inf, 2.0])
+    y_upper = np.array([1.0, 0.0, np.inf])
+
+    probabilities = IntReg.interval_prob(y_lower, y_upper, mu=0.0, sigma=1.0)
+    log_likelihood = IntReg.interval_log_likelihood(
+        y_lower, y_upper, mu=0.0, sigma=1.0
+    )
+
+    assert np.allclose(probabilities, np.clip(np.exp(log_likelihood), 1e-300, 1.0))
 
 
 def test_simple_point_data_fit(simple_point_data):

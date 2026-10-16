@@ -1,246 +1,564 @@
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
-from scipy.optimize import minimize
-from scipy.stats import norm
+import numpy.typing as npt
+
+from numpy.polynomial.hermite import hermgauss
+from scipy.optimize import OptimizeResult, minimize
+
+from jax import config
+config.update("jax_enable_x64", True)  # type: ignore[no-untyped-call]
+
+import jax
+import jax.numpy as jnp
+import jax.scipy as jsp
+
+ArrayLike = npt.ArrayLike
+FloatArray = npt.NDArray[np.float64]
 
 
 class MeIntReg:
     """
     Mixed-effects interval regression for censored, uncensored, and interval-censored data,
-    using maximum likelihood estimation under a normal model.
+    using marginal maximum likelihood under a Gaussian random-intercept model.
+
+    Without random effects:
+        [beta..., log_sigma]
+
+    With random effects:
+        [beta..., log_sigma, log_tau]
+
+    where:
+        beta  = fixed-effect coefficients
+        sigma = residual standard deviation
+        tau   = random-intercept standard deviation
+
+    Model:
+        y* = X beta + u_group + epsilon
+        u_group ~ N(0, tau^2)
+        epsilon ~ N(0, sigma^2)
+
+    Random effects are integrated out using Gauss-Hermite quadrature.
 
     Attributes:
-        y_lower (array-like): Lower bound values of the intervals.
-        y_upper (array-like): Upper bound values of the intervals.
-        X (array-like): Covariate matrix for fixed effects.
-        random_effects (array-like or None): Group labels determining random-effect membership.
-        n_random_effects (int): Number of unique random-effect groups.
+        y_lower (np.ndarray): Lower bounds of the observation intervals.
+        y_upper (np.ndarray): Upper bounds of the observation intervals.
+        X (np.ndarray): Fixed-effect design matrix.
+        random_effects (np.ndarray or None): Encoded group labels, or None
+            when the model has no random effects.
+        n_random_effects (int): Number of random-effect groups.
+        result (OptimizeResult): Optimization result created by `fit`.
     """
 
-    def __init__(self, y_lower, y_upper, X, random_effects=None):
+    result: OptimizeResult
+
+    def __init__(
+        self,
+        y_lower: ArrayLike,
+        y_upper: ArrayLike,
+        X: ArrayLike,
+        random_effects: Optional[ArrayLike] = None,
+        quadrature_points: int = 20,
+        n_jobs: int = -1,
+    ) -> None:
         """
-        Initialize the model with data.
+        Initialize the model.
 
         Args:
-            y_lower (array-like): Lower bounds of the intervals. Use -np.inf for left-censored values.
-            y_upper (array-like): Upper bounds of the intervals. Use np.inf for right-censored values.
-            X (array-like): Covariate matrix for fixed effects.
-            random_effects (array-like, optional): Group labels for random intercepts.
-                If None, the model includes only fixed effects.
+            y_lower (array-like): Lower interval bounds. Use -np.inf for
+                left-censored observations.
+            y_upper (array-like): Upper interval bounds. Use np.inf for
+                right-censored observations.
+            X (array-like): Fixed-effect design matrix, with one row per
+                observation.
+            random_effects (array-like or None): Optional group labels
+                defining random-intercept membership. If None, only fixed
+                effects are fitted.
+            quadrature_points (int): Number of Gauss-Hermite quadrature points
+                used to integrate the random effects. Defaults to 20.
+            n_jobs (int): Retained for backwards compatibility.
+
+        Returns:
+            None
         """
-        self.y_lower = y_lower
-        self.y_upper = y_upper
-        self.X = X
+
+        self.y_lower = np.asarray(y_lower, dtype=float)
+        self.y_upper = np.asarray(y_upper, dtype=float)
+        self.X = np.asarray(X, dtype=float)
+        self.quadrature_points = quadrature_points
+        self.n_jobs = n_jobs
+
+        self._y_lower = jnp.asarray(self.y_lower)
+        self._y_upper = jnp.asarray(self.y_upper)
+        self._X = jnp.asarray(self.X)
+
+        self.random_effects: Optional[Any] = None
+        self.n_random_effects: int = 0
+        self.group_indices: Optional[List[Any]] = None
+        self._group_indices: Optional[List[Any]] = None
+        self.gh_nodes: Optional[Any] = None
+        self.gh_weights: Optional[Any] = None
+        self.log_gh_weights: Optional[Any] = None
+        self._gh_nodes: Optional[Any] = None
+        self._log_gh_weights: Optional[Any] = None
 
         if random_effects is not None:
-            self.random_effects = np.array(random_effects)
-            self.n_random_effects = len(np.unique(random_effects))
+            random_effects = np.asarray(random_effects)
+            _, group_codes = np.unique(random_effects, return_inverse=True)
+
+            self.random_effects = group_codes
+            self.n_random_effects = len(np.unique(group_codes))
+            self.group_indices = [np.flatnonzero(group_codes == g) for g in range(self.n_random_effects)]
+            self._group_indices = [jnp.asarray(indices, dtype=jnp.int32) for indices in self.group_indices]
+
+            self.gh_nodes, self.gh_weights = hermgauss(quadrature_points)
+            self.log_gh_weights = np.log(self.gh_weights)
+
+            self._gh_nodes = jnp.asarray(self.gh_nodes)
+            self._log_gh_weights = jnp.asarray(self.log_gh_weights)
         else:
             self.random_effects = None
             self.n_random_effects = 0
+            self.group_indices = None
+            self._group_indices = None
+            self.gh_nodes = None
+            self.gh_weights = None
+            self.log_gh_weights = None
+            self._gh_nodes = None
+            self._log_gh_weights = None
 
-    def _compute_effects(
-        self, params: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray | None, np.ndarray]:
+        self.L2_penalties: Dict[str, float] = {}
+        self._value_and_grad: Any = None
+        self._hessian_fn: Any = None
+
+    def _unpack_params(
+        self, params: Any
+    ) -> Tuple[Any, Any, Optional[Any]]:
         """
-        Extract fixed effects (beta), random effects (u), and compute the linear predictor (mu).
-
-        If random effects, mu is:
-
-            mu = X @ beta + u[group_index]
-
-        Otherwise:
-
-            mu = X @ beta.
+        Unpack the model parameter vector.
 
         Args:
-            params (array-like): Parameter vector containing beta, random effects,
-                and log(sigma).
+            params (array-like): Model parameters. The first `X.shape[1]`
+                values are fixed effects, followed by log_sigma and, when
+                random effects are present, log_tau.
 
         Returns:
-            tuple: (beta, u, mu)
-                beta (array): Fixed-effect coefficients.
-                u (array or None): Random-effect coefficients (or None if not included).
-                mu (array): Mean for each observation given fixed and random effects.
+            tuple: Fixed-effect coefficients, log residual standard deviation,
+            and log random-effect standard deviation (or None).
         """
+
         n_fixed = self.X.shape[1]
         beta = params[:n_fixed]
+        log_sigma = params[n_fixed]
+        log_tau = params[n_fixed + 1] if self.random_effects is not None else None
 
-        if self.random_effects is not None:
-            u = params[n_fixed : n_fixed + self.n_random_effects]
-            mu = np.dot(self.X, beta) + u[self.random_effects]
-        else:
-            u = None
-            mu = np.dot(self.X, beta)
+        return beta, log_sigma, log_tau
 
-        return beta, u, mu
-
-    def log_L(self, params):
+    @staticmethod
+    def _log1mexp(x: Any) -> Any:
         """
-        Compute the negative log-likelihood for the mixed-effects interval regression model.
-
-        Censored, uncensored, and interval-censored contributions are computed
-        using normal PDF/CDF relationships. Random intercepts shift the mean
-        according to group membership.
+        Compute log(1 - exp(x)) stably for x <= 0.
 
         Args:
-            params (array-like): Parameters to be estimated: [beta, u, log(sigma)].
+            x (array-like): Values less than or equal to zero.
 
         Returns:
-            float: Negative log-likelihood (with optional L2 penalties).
+            jax.Array: Stable log(1 - exp(x)) values.
         """
-        _, _, mu = self._compute_effects(params)
-        sigma = np.maximum(
-            np.exp(params[-1]), 1e-10
-        )  # Log-transformed sigma for positivity
 
-        log_L = 0
+        x = jnp.minimum(x, -1e-15)
+        cutoff = -jnp.log(2.0)
 
-        # Likelihood function for point data
-        points = self.y_upper == self.y_lower
-        if np.any(points):
-            log_L += np.sum(norm.logpdf((self.y_upper[points] - mu[points]) / sigma))
+        x_left = jnp.minimum(x, cutoff - 1e-15)
+        x_right = jnp.maximum(x, cutoff)
 
-        # Likelihood function for left-censored values
-        left_censored = np.isin(self.y_lower, -np.inf)
-        if np.any(left_censored):
-            log_L += np.sum(
-                norm.logcdf((self.y_upper[left_censored] - mu[left_censored]) / sigma)
-            )
+        left = jnp.log1p(-jnp.exp(x_left))
+        right = jnp.log(-jnp.expm1(x_right))
 
-        # Likelihood function for right-censored values
-        right_censored = np.isin(self.y_upper, np.inf)
-        if np.any(right_censored):
-            log_L += np.sum(
-                np.log(
-                    1
-                    - norm.cdf(
-                        (self.y_lower[right_censored] - mu[right_censored]) / sigma
-                    )
-                )
-            )
+        return jnp.where(x < cutoff, left, right)
 
-        # Likelihood function for intervals
-        interval_censored = ~left_censored & ~right_censored & ~points
-        if np.any(interval_censored):
-            log_L += np.sum(
-                np.log(
-                    norm.cdf(
-                        (self.y_upper[interval_censored] - mu[interval_censored])
-                        / sigma
-                    )
-                    - norm.cdf(
-                        (self.y_lower[interval_censored] - mu[interval_censored])
-                        / sigma
-                    )
-                )
-            )
-
-        if hasattr(self, "L2_penalties") and len(self.L2_penalties) > 0:
-            log_L = self._apply_L2_regularisation(log_L, params)
-        return -log_L
-
-    def _apply_L2_regularisation(self, log_L, params):
+    @staticmethod
+    def _log_interval_prob(lower: Any, upper: Any) -> Any:
         """
-        Apply L2 regularization (ridge penalties) to the log-likelihood.
-        Each penalty is scaled by the number of observations.
+        Compute log[P(lower < Z < upper)] for Z ~ N(0, 1) stably.
 
         Args:
-            log_L (float): Unpenalized log-likelihood value.
-            params (array-like): Model parameters [beta, u, log(sigma)].
+            lower (array-like): Standardized lower interval bounds.
+            upper (array-like): Standardized upper interval bounds.
 
         Returns:
-            float: Regularized log-likelihood value.
+            jax.Array: Log probabilities for the intervals.
         """
+
+        logcdf_upper = jsp.special.log_ndtr(upper)
+        logcdf_lower = jsp.special.log_ndtr(lower)
+
+        delta_cdf = jnp.minimum(logcdf_lower - logcdf_upper, -1e-15)
+        log_prob_cdf = logcdf_upper + MeIntReg._log1mexp(delta_cdf)
+
+        logsf_lower = jsp.special.log_ndtr(-lower)
+        logsf_upper = jsp.special.log_ndtr(-upper)
+
+        delta_sf = jnp.minimum(logsf_upper - logsf_lower, -1e-15)
+        log_prob_sf = logsf_lower + MeIntReg._log1mexp(delta_sf)
+
+        return jnp.where(upper <= 0, log_prob_cdf, log_prob_sf)
+
+    @staticmethod
+    def _normal_logpdf(y: Any, mu: Any, sigma: Any) -> Any:
+        """
+        Compute the log-density of a normal distribution.
+
+        Args:
+            y (array-like): Observed values.
+            mu (array-like): Normal means.
+            sigma (float or array-like): Normal standard deviation.
+
+        Returns:
+            jax.Array: Normal log-density values.
+        """
+
+        z = (y - mu) / sigma
+        return -0.5 * z**2 - jnp.log(sigma) - 0.5 * jnp.log(2.0 * jnp.pi)
+
+    def _observation_loglik(self, indices: Any, mu: Any, sigma: Any) -> Any:
+        """
+        Compute the conditional log-likelihood for selected observations.
+
+        Args:
+            indices (array-like): Indices of observations to include.
+            mu (array-like): Conditional means for the observations.
+            sigma (float): Residual standard deviation.
+
+        Returns:
+            jax.Array: Sum of the log-likelihood contributions.
+        """
+
+        y_lower = self._y_lower[indices]
+        y_upper = self._y_upper[indices]
+
+        points = y_upper == y_lower
+        left = jnp.isneginf(y_lower)
+        right = jnp.isposinf(y_upper)
+        interval = ~(points | left | right)
+
+        safe_y = jnp.where(jnp.isfinite(y_upper), y_upper, 0.0)
+        point_ll = self._normal_logpdf(safe_y, mu, sigma)
+        point_ll = jnp.where(points, point_ll, 0.0)
+
+        left_upper = jnp.where(left, y_upper, mu)
+        z_upper = (left_upper - mu) / sigma
+        left_ll = jnp.where(left, jsp.special.log_ndtr(z_upper), 0.0)
+
+        right_lower = jnp.where(right, y_lower, mu)
+        z_lower = (right_lower - mu) / sigma
+        right_ll = jnp.where(right, jsp.special.log_ndtr(-z_lower), 0.0)
+
+        safe_lower = jnp.where(interval, y_lower, 0.0)
+        safe_upper = jnp.where(interval, y_upper, 1.0)
+
+        interval_lower = (safe_lower - mu) / sigma
+        interval_upper = (safe_upper - mu) / sigma
+        interval_ll = self._log_interval_prob(interval_lower, interval_upper)
+        interval_ll = jnp.where(interval, interval_ll, 0.0)
+
+        return jnp.sum(point_ll + left_ll + right_ll + interval_ll)
+
+    def _group_loglik(
+        self, indices: Any, fixed_mu: Any, sigma: Any, tau: Any
+    ) -> Any:
+        """
+        Marginal log-likelihood contribution for one random-effect group.
+        All quadrature points are evaluated simultaneously.
+
+        Args:
+            indices (array-like): Indices belonging to the group.
+            fixed_mu (array-like): Fixed-effect means for all observations.
+            sigma (float): Residual standard deviation.
+            tau (float): Random-intercept standard deviation.
+
+        Returns:
+            jax.Array: Marginal log-likelihood contribution for the group.
+        """
+
+        assert self._gh_nodes is not None
+        assert self._log_gh_weights is not None
+
+        y_lower = self._y_lower[indices]
+        y_upper = self._y_upper[indices]
+        group_fixed_mu = fixed_mu[indices]
+
+        u = jnp.sqrt(2.0) * tau * self._gh_nodes
+        mu = group_fixed_mu[None, :] + u[:, None]
+
+        points = y_upper == y_lower
+        left = jnp.isneginf(y_lower)
+        right = jnp.isposinf(y_upper)
+        interval = ~(points | left | right)
+
+        safe_y = jnp.where(jnp.isfinite(y_upper), y_upper, 0.0)
+        point_ll = self._normal_logpdf(safe_y[None, :], mu, sigma)
+        point_ll = jnp.where(points[None, :], point_ll, 0.0)
+
+        left_upper = jnp.where(left[None, :], y_upper[None, :], mu)
+        z_upper = (left_upper - mu) / sigma
+        left_ll = jnp.where(left[None, :], jsp.special.log_ndtr(z_upper), 0.0)
+
+        right_lower = jnp.where(right[None, :], y_lower[None, :], mu)
+        z_lower = (right_lower - mu) / sigma
+        right_ll = jnp.where(right[None, :], jsp.special.log_ndtr(-z_lower), 0.0)
+
+        safe_lower = jnp.where(interval, y_lower, 0.0)
+        safe_upper = jnp.where(interval, y_upper, 1.0)
+
+        interval_lower = (safe_lower[None, :] - mu) / sigma
+        interval_upper = (safe_upper[None, :] - mu) / sigma
+        interval_ll = self._log_interval_prob(interval_lower, interval_upper)
+        interval_ll = jnp.where(interval[None, :], interval_ll, 0.0)
+
+        node_loglik = jnp.sum(point_ll + left_ll + right_ll + interval_ll, axis=1)
+
+        return jsp.special.logsumexp(self._log_gh_weights + node_loglik) - 0.5 * jnp.log(jnp.pi)
+
+    def _apply_L2_regularisation(self, log_L: Any, params: Any) -> Any:
+        """
+        Apply optional L2 regularisation to the log-likelihood.
+
+        Args:
+            log_L (float or jax.Array): Unregularised log-likelihood.
+            params (array-like): Model parameter vector containing fixed
+                effects and log standard deviations.
+
+        Returns:
+            jax.Array: Regularised log-likelihood.
+        """
+
         lambda_beta = self.L2_penalties.get("lambda_beta", 0.0)
-        lambda_u = self.L2_penalties.get("lambda_u", 0.0)
-        lambda_sigma = self.L2_penalties.get(
-            "lambda_sigma", 0.0
-        )  # New regularization term
+        lambda_sigma = self.L2_penalties.get("lambda_sigma", 0.0)
+        lambda_tau = self.L2_penalties.get("lambda_tau", 0.0)
 
         N = self.X.shape[0]
+        beta, log_sigma, log_tau = self._unpack_params(params)
 
-        n_fixed = self.X.shape[1]
-        beta = params[:n_fixed]
-        u = params[n_fixed : n_fixed + self.n_random_effects]
-        log_sigma = params[-1]
+        penalty_beta = (lambda_beta / N) * jnp.sum(beta**2)
+        penalty_sigma = (lambda_sigma / N) * log_sigma**2
+        penalty_tau = (lambda_tau / N) * log_tau**2 if log_tau is not None else 0.0
 
-        # Compute scaled L2 penalties
-        penalty_beta = (lambda_beta / N) * np.sum(np.square(beta))
-        penalty_u = (lambda_u / N) * np.sum(np.square(u))
-        penalty_sigma = (lambda_sigma / N) * log_sigma**2  # Regularize log(sigma)
+        return log_L - penalty_beta - penalty_sigma - penalty_tau
 
-        # Combine likelihood and regularization penalties
-        return log_L - penalty_beta - penalty_u - penalty_sigma
-
-    def _initial_params(self):
+    def _neg_loglik(self, params: Any) -> Any:
         """
-        Generate automatic initial values for all parameters.
+        Compute the negative marginal log-likelihood.
 
-        Initial beta is obtained from a least-squares regression of the finite
-        midpoints of the intervals on X. Random effects are initialized to zero.
-        The standard deviation of the finite midpoints is used to initialize log(sigma).
+        Args:
+            params (array-like): Fixed-effect coefficients and log standard
+                deviations, ordered as described in the class documentation.
 
         Returns:
-            array: Initial parameter vector [beta, random effects, log(sigma)].
+            jax.Array: Negative marginal log-likelihood.
         """
-        # Mean of uncensored data for initial beta estimate
+
+        beta, log_sigma, log_tau = self._unpack_params(params)
+
+        sigma = jnp.exp(log_sigma)
+        fixed_mu = self._X @ beta
+
+        if self.random_effects is None:
+            indices = jnp.arange(self._y_lower.shape[0], dtype=jnp.int32)
+            log_L = self._observation_loglik(indices, fixed_mu, sigma)
+        else:
+            assert log_tau is not None
+            assert self._group_indices is not None
+            tau = jnp.exp(log_tau)
+            log_L = jnp.array(0.0, dtype=jnp.float64)
+
+            for indices in self._group_indices:
+                log_L += self._group_loglik(indices, fixed_mu, sigma, tau)
+
+        if len(self.L2_penalties) > 0:
+            log_L = self._apply_L2_regularisation(log_L, params)
+
+        return -log_L
+
+    def log_L(self, params: ArrayLike) -> float:
+        """
+        Compute the negative marginal log-likelihood for supplied parameters.
+
+        Args:
+            params (array-like): Fixed-effect coefficients and log standard
+                deviations, ordered as described in the class documentation.
+
+        Returns:
+            float: Negative marginal log-likelihood.
+        """
+
+        return float(self._neg_loglik(jnp.asarray(params, dtype=jnp.float64)))
+
+    def _initial_params(self) -> FloatArray:
+        """
+        Generate automatic initial parameter values.
+
+        Without random effects:
+            [beta..., log_sigma]
+
+        With random effects:
+            [beta..., log_sigma, log_tau]
+
+        Returns:
+            np.ndarray: Initial parameter vector for the model.
+        """
+
         midpoints = (self.y_lower + self.y_upper) / 2.0
         valid_mask = np.isfinite(midpoints)
 
-        # Filter X and midpoints to exclude rows with non-finite midpoints
-        X, midpoints = self.X[valid_mask], midpoints[valid_mask]
+        X_valid = self.X[valid_mask]
+        midpoints_valid = midpoints[valid_mask]
 
-        # Solve linear regression for beta
-        beta_init = np.linalg.lstsq(X, midpoints, rcond=None)[0]
+        beta_init = np.linalg.lstsq(X_valid, midpoints_valid, rcond=None)[0]
+
+        sigma_init = max(np.nanstd(midpoints_valid), 1e-6)
+        log_sigma_init = np.log(sigma_init)
 
         if self.random_effects is not None:
-            u_init = np.zeros(self.n_random_effects)
-        else:
-            u_init = []
+            tau_init = 0.5
+            log_tau_init = np.log(tau_init)
+            return np.concatenate([beta_init, [log_sigma_init, log_tau_init]])
 
-        # Standard deviation of the valid midpoints for sigma (log-transformed for positivity)
-        sigma = np.nanstd(midpoints)
-        sigma = np.log(sigma)
+        return np.concatenate([beta_init, [log_sigma_init]])
 
-        return np.concatenate([beta_init, u_init, [sigma]])
+    def _objective_with_grad(self, params: ArrayLike) -> Tuple[float, FloatArray]:
+        """
+        Return the objective value and gradient for scipy.optimize.minimize.
+
+        Args:
+            params (array-like): Model parameter vector.
+
+        Returns:
+            tuple: Objective value as a float and gradient as a NumPy array.
+        """
+
+        if self._value_and_grad is None:
+            self._value_and_grad = jax.jit(jax.value_and_grad(self._neg_loglik))
+
+        value, gradient = self._value_and_grad(
+            jnp.asarray(np.asarray(params, dtype=float), dtype=jnp.float64)
+        )
+
+        return float(value), np.asarray(gradient, dtype=float)
+
+    def hessian(self, params: Optional[ArrayLike] = None) -> FloatArray:
+        """
+        Calculate the Hessian of the negative marginal log-likelihood.
+
+        If params is None, use the fitted parameter vector.
+
+        Args:
+            params (array-like or None): Parameter vector at which to compute
+                the Hessian. If None, the fitted parameters are used.
+
+        Returns:
+            np.ndarray: Hessian matrix of the negative marginal
+            log-likelihood.
+
+        Raises:
+            ValueError: If params is None and the model has not been fitted.
+        """
+
+        if params is None:
+            if not hasattr(self, "result"):
+                raise ValueError("The model must be fitted before requesting the Hessian.")
+            params = self.result.x
+
+        if self._hessian_fn is None:
+            self._hessian_fn = jax.jit(jax.hessian(self._neg_loglik))
+
+        H = self._hessian_fn(jnp.asarray(params, dtype=jnp.float64))
+        return np.asarray(H, dtype=float)
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """
+        Remove compiled functions before serialization.
+
+        Returns:
+            dict: Model state with compiled JAX functions removed.
+        """
+        state = self.__dict__.copy()
+        state["_value_and_grad"] = None
+        state["_hessian_fn"] = None
+        return state
+
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """
+        Restore model state after deserialization.
+
+        Args:
+            state (dict): Previously serialized model state.
+
+        Returns:
+            None
+        """
+        self.__dict__.update(state)
+        self._value_and_grad = None
+        self._hessian_fn = None
 
     def fit(
         self,
-        method="BFGS",
-        initial_params=None,
-        bounds=None,
-        options=None,
-        L2_penalties=None,
-    ):
+        method: str = "BFGS",
+        initial_params: Optional[ArrayLike] = None,
+        bounds: Any = None,
+        options: Optional[Dict[str, Any]] = None,
+        L2_penalties: Optional[Dict[str, float]] = None,
+    ) -> "MeIntReg":
         """
-        Fit the mixed-effects interval regression model using maximum likelihood estimation.
+        Fit the interval-regression model using marginal maximum likelihood.
 
-        If no initial parameters are supplied, they are generated automatically.
-        Optional L2 penalties may be applied to fixed effects, random effects,
-        and log(sigma).
+        Parameters are ordered as [beta..., log_sigma] without random effects
+        and [beta..., log_sigma, log_tau] with random effects.
 
         Args:
-            method (str, optional): Optimization method passed to scipy.optimize.minimize.
-                Defaults to "BFGS".
-            initial_params (array-like, optional): Initial values for
-                [beta, random effects, log(sigma)]. If None, automatic initial
-                guesses are generated.
-            bounds (array-like, optional): Parameter bounds passed directly to
-                minimize, applying in order to all parameters.
-            options (dict, optional): Options dictionary for the optimizer.
-            L2_penalties (dict or None): Optional L2 regularisation strengths,
-                e.g. {"lambda_beta": ..., "lambda_u": ..., "lambda_sigma": ...}.
-                Defaults to None.
+            method (str): Optimization method passed to
+                scipy.optimize.minimize. Defaults to "BFGS".
+            initial_params (array-like or None): Optional initial parameter
+                vector. If None, initial values are generated automatically.
+            bounds (sequence or None): Optional parameter bounds passed to
+                scipy.optimize.minimize.
+            options (dict or None): Options passed to
+                scipy.optimize.minimize.
+            L2_penalties (dict or None): Optional regularisation strengths,
+                such as {"lambda_beta": ..., "lambda_sigma": ...,
+                "lambda_tau": ...}.
 
         Returns:
-            MeIntReg: The fitted model instance, with the optimization result.
+            MeIntReg: The fitted model instance, with the optimization result
+            available as `result`.
         """
-        self.L2_penalties = L2_penalties or {}
+
+        self.L2_penalties = dict(L2_penalties or {})
 
         if initial_params is None:
             initial_params = self._initial_params()
 
+        initial_params = np.asarray(initial_params, dtype=float)
+
+        self._value_and_grad = jax.jit(jax.value_and_grad(self._neg_loglik))
+        self._hessian_fn = None
+        self._value_and_grad(jnp.asarray(initial_params, dtype=jnp.float64))
+
+        value0, grad0 = self._objective_with_grad(initial_params)
+
+        print("INITIAL OBJECTIVE:", value0)
+        print("INITIAL OBJECTIVE FINITE:", np.isfinite(value0))
+        print("INITIAL GRADIENT FINITE:", np.isfinite(grad0).all())
+        print("INITIAL MAX |GRAD|:", np.max(np.abs(grad0)))
+
         self.result = minimize(
-            self.log_L, initial_params, method=method, bounds=bounds, options=options
+            self._objective_with_grad,
+            initial_params,
+            method=method,
+            jac=True,
+            bounds=bounds,
+            options=options,
         )
+
         return self

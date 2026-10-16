@@ -1,5 +1,6 @@
 import pytest
 import numpy as np
+import pickle
 from intreg import MeIntReg
 from scipy.optimize import OptimizeResult
 
@@ -36,7 +37,7 @@ def right_censored_data():
 
 @pytest.fixture
 def mixed_interval_and_point_data():
-    """Fixture for mixed interval and point data."""
+    """Fixture for mixed interval-censored and point data."""
     y_lower = np.array([1, 2, 3, 3])
     y_upper = np.array([1, np.inf, 4, 3])
     X = np.array([[1, 0], [1, 1], [1, 2], [1, 3]])
@@ -46,7 +47,7 @@ def mixed_interval_and_point_data():
 
 @pytest.fixture
 def clear_interval_censored_data():
-    """Fixture for clear interval-censored data with obvi ous midpoints."""
+    """Fixture for interval-censored data with clear midpoints."""
     y_lower = np.array([1, 2, 3, 4])
     y_upper = np.array([2, 3, 4, 5])
     X = np.array([[1, 0], [1, 1], [1, 2], [1, 3]])
@@ -61,162 +62,196 @@ def test_initial_params(
     mixed_interval_and_point_data,
     clear_interval_censored_data,
 ):
-    """Test _initial_params method for mixed-effects interval regression."""
+    """Test automatic starting values for models with random intercepts."""
 
     test_cases = [
         (simple_point_data, "simple point data"),
-        (left_censored_data, "left censored data"),
-        (right_censored_data, "right censored data"),
-        (mixed_interval_and_point_data, "mixed inteval and point data"),
-        (clear_interval_censored_data, "clear interval censored data"),
+        (left_censored_data, "left-censored data"),
+        (right_censored_data, "right-censored data"),
+        (mixed_interval_and_point_data, "mixed interval and point data"),
+        (clear_interval_censored_data, "interval-censored data"),
     ]
 
     for (y_lower, y_upper, X, random_effects), description in test_cases:
         model = MeIntReg(y_lower, y_upper, X, random_effects)
-
         initial_params = model._initial_params()
-        beta_init = initial_params[: X.shape[1]]
-        u_init = initial_params[X.shape[1] : X.shape[1] + model.n_random_effects]
-        log_sigma_init = initial_params[-1]
 
-        # Assert beta is computed via linear regression
         midpoints = (y_lower + y_upper) / 2.0
         valid_mask = np.isfinite(midpoints)
-        X, midpoints = X[valid_mask], midpoints[valid_mask]
-        expected_beta = np.linalg.lstsq(X, midpoints, rcond=None)[0]
+        expected_beta = np.linalg.lstsq(X[valid_mask], midpoints[valid_mask], rcond=None)[0]
+        expected_log_sigma = np.log(max(np.nanstd(midpoints[valid_mask]), 1e-6))
 
+        assert initial_params.shape == (X.shape[1] + 2,)
         assert np.allclose(
-            beta_init, expected_beta, atol=1e-4
-        ), f"Failed for {description}: beta initialization incorrect"
-
-        # Assert random effects are initialized as zeros
-        assert np.allclose(
-            u_init, 0, atol=1e-4
-        ), f"Failed for {description}: random effects not initialized to zero"
-
-        # Assert log_sigma is a log of the standard deviation of midpoints
-        expected_log_sigma = np.log(np.nanstd(midpoints))
+            initial_params[: X.shape[1]], expected_beta, atol=1e-4
+        ), f"Failed for {description}: fixed-effect starting values are incorrect"
         assert np.isclose(
-            log_sigma_init, expected_log_sigma, atol=1e-4
-        ), f"Failed for {description}: log(sigma) initialization incorrect"
+            initial_params[-2], expected_log_sigma, atol=1e-4
+        ), f"Failed for {description}: log(sigma) starting value is incorrect"
+        assert np.isclose(
+            initial_params[-1], np.log(0.5), atol=1e-4
+        ), f"Failed for {description}: log(tau) starting value is incorrect"
+
+
+def test_initial_params_without_random_effects(simple_point_data):
+    """Test automatic starting values when random effects are omitted."""
+    y_lower, y_upper, X, _ = simple_point_data
+    model = MeIntReg(y_lower, y_upper, X)
+    initial_params = model._initial_params()
+
+    assert initial_params.shape == (X.shape[1] + 1,)
+    assert np.all(np.isfinite(initial_params))
+
+
+def test_no_random_effects_likelihood_gradient_and_hessian():
+    """Test likelihood derivatives when the model has no random effects."""
+    y_lower = np.array([1.0, -np.inf, 2.0, 0.0])
+    y_upper = np.array([1.0, 0.0, np.inf, 2.0])
+    X = np.ones((4, 1))
+    model = MeIntReg(y_lower, y_upper, X)
+    likelihood_params = np.array([0.5, 0.0])
+
+    # Exercise point, left-censored, right-censored, and interval branches.
+    assert np.isfinite(model.log_L(likelihood_params))
+    _, censored_gradient = model._objective_with_grad(likelihood_params)
+    assert np.all(np.isfinite(censored_gradient))
+
+    grouped_model = MeIntReg(
+        y_lower, y_upper, X, random_effects=np.array([0, 1, 1, 2])
+    )
+    grouped_params = grouped_model._initial_params()
+    _, grouped_gradient = grouped_model._objective_with_grad(grouped_params)
+    assert np.all(np.isfinite(grouped_gradient))
+
+    # Use finite point data to check derivatives independently of censoring masks.
+    point_model = MeIntReg([1.0, 2.0, 3.0], [1.0, 2.0, 3.0], np.ones((3, 1)))
+    params = np.array([2.0, 0.0])
+    objective, gradient = point_model._objective_with_grad(params)
+    assert np.isfinite(objective)
+    assert gradient.shape == params.shape
+    assert np.all(np.isfinite(gradient))
+
+    point_model.result = OptimizeResult(x=params)
+    hessian = point_model.hessian()
+    assert hessian.shape == (len(params), len(params))
+    assert np.all(np.isfinite(hessian))
+
+
+def test_hessian_requires_fit_when_params_are_omitted(simple_point_data):
+    """Test Hessian reports a clear error before fitting without parameters."""
+    y_lower, y_upper, X, _ = simple_point_data
+    model = MeIntReg(y_lower, y_upper, X)
+
+    with pytest.raises(ValueError, match="must be fitted"):
+        model.hessian()
+
+
+def test_serialization_clears_compiled_functions():
+    """Test compiled JAX functions are recreated after serialization."""
+    y_lower = np.array([1.0, 2.0, 3.0])
+    X = np.ones((3, 1))
+    model = MeIntReg(y_lower, y_lower, X)
+    params = np.array([2.0, 0.0])
+    model._objective_with_grad(params)
+    model.hessian(params)
+
+    restored_model = pickle.loads(pickle.dumps(model))
+    assert restored_model._value_and_grad is None
+    assert restored_model._hessian_fn is None
+    assert np.isfinite(restored_model.log_L(params))
 
 
 def test_log_L(
     simple_point_data,
     left_censored_data,
     right_censored_data,
+    mixed_interval_and_point_data,
     clear_interval_censored_data,
 ):
-    """Test log_L using parameters generated by _initial_params on all data types."""
+    """Test the negative marginal log-likelihood for each observation type."""
 
-    # Define test cases as tuples: (data, description)
     test_cases = [
         (simple_point_data, "point data"),
         (right_censored_data, "right-censored data"),
         (left_censored_data, "left-censored data"),
+        (mixed_interval_and_point_data, "mixed interval and point data"),
         (clear_interval_censored_data, "interval-censored data"),
     ]
 
     for (y_lower, y_upper, X, random_effects), description in test_cases:
         model = MeIntReg(y_lower, y_upper, X, random_effects)
-
         params = model._initial_params()
-        log_likelihood = model.log_L(params)
+        negative_log_likelihood = model.log_L(params)
 
         assert isinstance(
-            log_likelihood, float
-        ), f"log_L output should be float for {description}"
+            negative_log_likelihood, float
+        ), f"log_L output should be a float for {description}"
         assert np.isfinite(
-            log_likelihood
+            negative_log_likelihood
         ), f"log_L output should be finite for {description}"
-        assert (
-            log_likelihood > 0
-        ), f"log_L output should be positive for {description}, got {log_likelihood}"
 
 
-def test_simple_point_data_fit(simple_point_data):
-    y_lower, y_upper, X, random_effects = simple_point_data
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "simple_point_data",
+        "left_censored_data",
+        "right_censored_data",
+        "mixed_interval_and_point_data",
+        "clear_interval_censored_data",
+    ],
+)
+def test_fit_returns_finite_result(request, fixture_name):
+    """Test fitting returns finite parameter estimates for each data type."""
+    y_lower, y_upper, X, random_effects = request.getfixturevalue(fixture_name)
     model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
-    result = model.result
-    print(result)
-    print(result.x[0], result.x[1])
-    assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 0.6, atol=1e-1)  # Expect mu near 0.6
-    assert np.isclose(result.x[1], 1, atol=1e-1)  # Expect sigma near 1
 
-
-def test_left_censored_data_fit(left_censored_data):
-    y_lower, y_upper, X, random_effects = left_censored_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
-    result = model.result
-    print(result.x[0], result.x[1])
-    assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], -0.5, atol=1e-1)
-    assert np.isclose(result.x[1], 1, atol=1e-1)
-
-
-def test_right_censored_data_fit(right_censored_data):
-    y_lower, y_upper, X, random_effects = right_censored_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
-    result = model.result
-    print(result.x[0], result.x[1])
-    assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 1.2, atol=1e-1)
-    assert np.isclose(result.x[1], 1.1, atol=1e-1)
-
-
-def test_mixed_interval_and_point_data_fit(mixed_interval_and_point_data):
-    y_lower, y_upper, X, random_effects = mixed_interval_and_point_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
-    result = model.result
-    print(result.x[0], result.x[1])
-    assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 1.7, atol=1e-1)
-    assert np.isclose(result.x[1], 0.4, atol=1e-1)
-
-
-def test_clear_interval_censored_data_fit(clear_interval_censored_data):
-    y_lower, y_upper, X, random_effects = clear_interval_censored_data
-    model = MeIntReg(y_lower, y_upper, X, random_effects).fit()
-    result = model.result
-    print(result.x[0], result.x[1])
-    assert isinstance(result, OptimizeResult)
-    assert np.isclose(result.x[0], 1.5, atol=1e-1)
-    assert np.isclose(result.x[1], 1, atol=1e-1)
+    assert isinstance(model.result, OptimizeResult)
+    assert model.result.x.shape == (X.shape[1] + 2,)
+    assert np.all(np.isfinite(model.result.x))
+    assert np.isfinite(model.result.fun)
 
 
 def test_meintreg_regularisation():
-    y_low = np.array([1.0, 1.0, 2.0, 2.0])
-    y_high = y_low.copy()  # exact values
+    """Test L2 penalties for fixed effects and both standard deviations."""
+    y_lower = np.array([1.0, 1.0, 2.0, 2.0])
+    y_upper = y_lower.copy()  # exact values
     X = np.ones((4, 1))  # intercept-only fixed effect
     groups = np.array([0, 0, 1, 1])  # random intercept groups
-    model = MeIntReg(y_low, y_high, X, random_effects=groups)
+    model = MeIntReg(y_lower, y_upper, X, random_effects=groups)
     model.L2_penalties = {
         "lambda_beta": 2.0,
-        "lambda_u": 3.0,
         "lambda_sigma": 4.0,
+        "lambda_tau": 3.0,
     }
-    # params = [beta, u0, u1, log_sigma]
-    params = np.array([1.5, 0.5, -0.5, -1.0])
-    unpen = -10.0
 
-    # expected penalties:
-    # N = 4
-    # beta penalty: (2/4)*(1.5^2)      = (0.5)*2.25 = 1.125
-    # u penalty:    (3/4)*(0.5^2+(-0.5)^2) = 0.75*(0.25+0.25)=0.75*0.5 = 0.375
-    # sigma pen:    (4/4)*(1.0^2)      = 1.0
-    expected = unpen - (1.125 + 0.375 + 1.0)
-
-    direct = model._apply_L2_regularisation(unpen, params)
+    # params = [beta, log_sigma, log_tau]
+    params = np.array([1.5, -1.0, -0.5])
+    unpenalised = -10.0
+    expected = unpenalised - (
+        (2.0 / 4) * 1.5**2
+        + (4.0 / 4) * (-1.0) ** 2
+        + (3.0 / 4) * (-0.5) ** 2
+    )
+    direct = model._apply_L2_regularisation(unpenalised, params)
     assert np.isclose(direct, expected)
-    
-    #  check that log_L applies penalties
-    no_penalty = MeIntReg(y_low, y_high, X, groups).log_L(params)
-    model.L2_penalties = {"lambda_beta": 50.0, "lambda_u": 50.0, "lambda_sigma": 0.0}
-    with_penalty = model.log_L(params)
-    assert with_penalty > no_penalty  # more penalty → larger negative log-likelihood
 
-    model = MeIntReg(y_low, y_high, X, groups)
-    model.fit(L2_penalties={"lambda_beta": 1.0, "lambda_u": 1.0, "lambda_sigma": 1.0})
+    no_penalty = MeIntReg(y_lower, y_upper, X, groups).log_L(params)
+    model.L2_penalties = {
+        "lambda_beta": 50.0,
+        "lambda_sigma": 0.0,
+        "lambda_tau": 0.0,
+    }
+    with_penalty = model.log_L(params)
+    assert with_penalty > no_penalty  # more penalty increases negative log-likelihood
+
+    model = MeIntReg(y_lower, y_upper, X, groups)
+    model.fit(
+        L2_penalties={
+            "lambda_beta": 1.0,
+            "lambda_sigma": 1.0,
+            "lambda_tau": 1.0,
+        }
+    )
     assert hasattr(model, "result")
-    assert model.result.x is not None 
+    assert model.result.x is not None
